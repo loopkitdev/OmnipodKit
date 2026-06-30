@@ -123,7 +123,7 @@ extension PeripheralManager {
     }
     
     /// - Throws: PeripheralManagerError
-    func readMessagePacket() throws -> MessagePacket? {
+    func readMessagePacket(disconnectOnUnresponsivePod: Bool = true) throws -> MessagePacket? {
         dispatchPrecondition(condition: .onQueue(queue))
 
         var packet: MessagePacket?
@@ -182,7 +182,7 @@ extension PeripheralManager {
                       String(describing: error),
                       String(describing: peripheral.state))
             if let error = error as? PeripheralManagerError, error.isSymptomaticOfUnresponsivePod {
-                if peripheral.state == .connected {
+                if disconnectOnUnresponsivePod, peripheral.state == .connected {
                     log.error("[readMessagePacket] Disconnecting due to unresponsive pod error while reading")
                     central?.cancelPeripheralConnection(peripheral)
                 } else {
@@ -384,14 +384,18 @@ extension PeripheralManager {
     /// pod-initiated transfer while idle and schedules a serialized receive.
     func noteInboundValueForUnsolicitedListener(characteristicUUID: CBUUID, value: Data) {
         guard PeripheralManager.unsolicitedFaultListenerEnabled else { return }
+        guard unsolicitedListenerArmed else { return }       // only after an encrypted session is established
         guard isIdleForUnsolicitedListener else { return }   // a response we're awaiting — not unsolicited
         guard peripheral.state == .connected else { return }
 
         // Transfer-start signal differs by pod type:
-        //  - Dash: an RTS (0x00) on the command characteristic (pod requests to send).
+        //  - Dash: a SINGLE-byte RTS (0x00) on the command characteristic. Multi-byte values
+        //    whose first byte is 0x00 are session-negotiation handshakes (e.g. 00000100f4),
+        //    NOT an RTS — exclude them.
         //  - O5:   the first data packet (seq 0) on the data characteristic (no RTS/CTS).
         let isDashStart = podType.isDash
             && characteristicUUID == profile.commandCharacteristicUUID
+            && value.count == 1
             && value.first == PodCommand.RTS.rawValue
         let isO5Start = podType.isO5
             && characteristicUUID == profile.dataCharacteristicUUID
@@ -407,7 +411,8 @@ extension PeripheralManager {
             // serialized op ran.
             guard PeripheralManager.unsolicitedFaultListenerEnabled, self.peripheral.state == .connected else { return }
             do {
-                guard let packet = try self.readMessagePacket() else {
+                // NEVER disconnect from the observer path — a timeout here must be silent.
+                guard let packet = try self.readMessagePacket(disconnectOnUnresponsivePod: false) else {
                     self.log.default("[unsolicited] no packet assembled (likely flushed by an intervening command)")
                     return
                 }

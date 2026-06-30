@@ -682,6 +682,7 @@ extension BlePodComms: OmniConnectionDelegate {
         if let podState = podState, manager.peripheral.identifier.uuidString == podState.bleIdentifier {
             log.bleDebug("omnipodPeripheralDidConnect for %@", manager.peripheral.identifier.uuidString)
             needsSessionEstablishment = true
+            manager.unsolicitedListenerArmed = false   // re-negotiating; don't observe handshake traffic
             self.manager = manager
             delegate?.omnipodPeripheralDidConnect(manager: manager)
         }
@@ -690,6 +691,7 @@ extension BlePodComms: OmniConnectionDelegate {
     func omnipodPeripheralDidDisconnect(peripheral: CBPeripheral, error: Error?) {
         if let podState = podState, peripheral.identifier.uuidString == podState.bleIdentifier {
             log.bleDebug("omnipodPeripheralDidDisconnect for %@", peripheral.identifier.uuidString)
+            manager?.unsolicitedListenerArmed = false
             delegate?.omnipodPeripheralDidDisconnect(peripheral: peripheral, error: error)
         }
     }
@@ -739,6 +741,7 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
+                manager.unsolicitedListenerArmed = true   // encrypted session ready; safe to observe pod-initiated transfers
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
                 log.error("Pod session sync error: %{public}@", String(describing: error))

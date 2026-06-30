@@ -79,6 +79,12 @@ class PeripheralManager: NSObject {
 
     weak var delegate: PeripheralManagerDelegate?
 
+    /// PROTOTYPE: armed only once an encrypted session is fully established (set by
+    /// BlePodComms). The unsolicited-fault listener must NOT engage during connect/session
+    /// negotiation — that traffic looks like pod-initiated transfers (multi-byte handshakes
+    /// whose first byte is 0x00) and false-triggered a disconnect loop.
+    var unsolicitedListenerArmed = false
+
     init(peripheral: CBPeripheral, podType: PodType, centralManager: CBCentralManager) {
         self.peripheral = peripheral
         self.central = centralManager
