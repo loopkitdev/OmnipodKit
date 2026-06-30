@@ -372,10 +372,11 @@ extension PeripheralManagerError {
 // and to capture the nonce-sequence behavior stage 2 needs.
 extension PeripheralManager {
 
-    /// Off by default. Enable for field testing only:
-    ///   UserDefaults.standard.set(true, forKey: "OmnipodKit.unsolicitedFaultListenerEnabled")
+    /// FIELD TEST BUILD: defaults ON so the listener runs without UI to set the flag.
+    /// REVERT this commit before merge — stage 1 must ship OFF by default. The UserDefaults
+    /// key still overrides (set it to false to disable on-device).
     static var unsolicitedFaultListenerEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "OmnipodKit.unsolicitedFaultListenerEnabled")
+        UserDefaults.standard.object(forKey: "OmnipodKit.unsolicitedFaultListenerEnabled") as? Bool ?? true
     }
 
     /// Called from the cmd/data value-update macros (BLE callback thread) AFTER the raw
