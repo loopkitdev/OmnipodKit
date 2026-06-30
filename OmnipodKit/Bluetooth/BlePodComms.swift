@@ -761,3 +761,46 @@ extension BlePodComms: PodCommsSessionDelegate {
         podState = state
     }
 }
+
+// MARK: - PROTOTYPE: unsolicited (pod-initiated) fault decrypt + logging — Stage 1
+extension BlePodComms {
+    func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {
+        podStateLock.lock()
+        let mtsSnapshot = podState?.bleMessageTransportState
+        podStateLock.unlock()
+
+        guard let mts = mtsSnapshot, let ck = mts.ck, let noncePrefix = mts.noncePrefix, noncePrefix.count == 8 else {
+            log.error("[unsolicited] cannot decrypt: no established session keys (havePodState=%{public}@)", String(describing: podState != nil))
+            return
+        }
+
+        let enDecrypt = EnDecrypt(nonce: Nonce(prefix: noncePrefix), ck: ck)
+
+        log.default("[unsolicited] decrypt attempt. live state: nonceSeq=%{public}d msgSeq=%{public}d eapSeq=%{public}d messageNumber=%{public}d. packet seq=%{public}d type=%{public}@ encPayloadLen=%{public}d",
+                    mts.nonceSeq, mts.msgSeq, mts.eapSeq, mts.messageNumber, packet.sequenceNumber, String(describing: packet.type), packet.payload.count)
+
+        // A normal response decrypts at nonceSeq+1 (readAndAckResponse increments nonceSeq
+        // before decrypt). An unsolicited message may land at a different offset; the offset
+        // that decrypts is the key datum stage 2 needs to advance live state correctly.
+        let base = mts.nonceSeq
+        for delta in [1, 0, 2, 3, -1] {
+            let seq = base + delta
+            guard seq >= 0 else { continue }
+            do {
+                let decrypted = try enDecrypt.decrypt(packet, seq)
+                log.default("[unsolicited] DECRYPT OK at nonceSeq=%{public}d (delta=%{public}d). decryptedPayloadLen=%{public}d decryptedPayload=%{public}@",
+                            seq, delta, decrypted.payload.count, decrypted.payload.hexadecimalString)
+                // STAGE 1 ENDS HERE — log only. We deliberately do NOT advance live
+                // nonceSeq/msgSeq/messageNumber and do NOT route the alert, because the
+                // correct advancement (and whether pods push these at all) is exactly what
+                // these field logs confirm. STAGE 2: advance bleMessageTransportState by the
+                // proven delta and feed `decrypted` through parseResponse -> fault handling.
+                return
+            } catch {
+                log.debug("[unsolicited] decrypt miss at nonceSeq=%{public}d (delta=%{public}d): %{public}@", seq, delta, String(describing: error))
+            }
+        }
+        log.error("[unsolicited] DECRYPT FAILED at all tried offsets (base nonceSeq=%{public}d). encPayload=%{public}@",
+                  base, packet.payload.hexadecimalString)
+    }
+}

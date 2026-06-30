@@ -118,6 +118,25 @@ extension PeripheralManager {
 protocol PeripheralManagerDelegate: AnyObject {
     // Called from the PeripheralManager's queue
     func completeConfiguration(for manager: PeripheralManager) throws
+
+    /// PROTOTYPE (unsolicited-fault listener): a fully-assembled MessagePacket that
+    /// arrived UNSOLICITED — i.e. the pod initiated a transfer while we had no command
+    /// in flight. The implementer (BlePodComms) holds the session keys and decrypts +
+    /// logs it. Default is a no-op. Gated by `PeripheralManager.unsolicitedFaultListenerEnabled`.
+    func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket)
+}
+
+extension PeripheralManagerDelegate {
+    func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {}
+}
+
+extension PeripheralManager {
+    /// True when no command session is queued/running — used by the unsolicited-fault
+    /// listener to decide whether an inbound notification is pod-initiated (vs. a
+    /// response we're waiting for). `sessionQueue` is private to this file.
+    var isIdleForUnsolicitedListener: Bool {
+        return sessionQueue.operationCount == 0
+    }
 }
 
 

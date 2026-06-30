@@ -359,3 +359,64 @@ extension PeripheralManagerError {
         }
     }
 }
+
+// MARK: - PROTOTYPE: unsolicited (pod-initiated) fault listener — Stage 1 (capture + decrypt-log)
+//
+// While CONNECTED, a pod can initiate a transfer (e.g. a fault/alert) without us having
+// sent a command. Today those notifications are only buffered and then flushed
+// (clearCommsQueues) before the next command, so we only learn of faults by polling
+// GetStatus. This stage detects a pod-initiated transfer while idle, drives the EXISTING
+// receive path to assemble the encrypted MessagePacket, and hands it to the delegate to
+// decrypt + log. It intentionally does NOT mutate session sequence state and does NOT
+// route alerts — its job is to confirm from field logs that pods push faults unsolicited
+// and to capture the nonce-sequence behavior stage 2 needs.
+extension PeripheralManager {
+
+    /// Off by default. Enable for field testing only:
+    ///   UserDefaults.standard.set(true, forKey: "OmnipodKit.unsolicitedFaultListenerEnabled")
+    static var unsolicitedFaultListenerEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "OmnipodKit.unsolicitedFaultListenerEnabled")
+    }
+
+    /// Called from the cmd/data value-update macros (BLE callback thread) AFTER the raw
+    /// value is buffered. Must be cheap and non-blocking. Detects the start of a
+    /// pod-initiated transfer while idle and schedules a serialized receive.
+    func noteInboundValueForUnsolicitedListener(characteristicUUID: CBUUID, value: Data) {
+        guard PeripheralManager.unsolicitedFaultListenerEnabled else { return }
+        guard isIdleForUnsolicitedListener else { return }   // a response we're awaiting — not unsolicited
+        guard peripheral.state == .connected else { return }
+
+        // Transfer-start signal differs by pod type:
+        //  - Dash: an RTS (0x00) on the command characteristic (pod requests to send).
+        //  - O5:   the first data packet (seq 0) on the data characteristic (no RTS/CTS).
+        let isDashStart = podType.isDash
+            && characteristicUUID == profile.commandCharacteristicUUID
+            && value.first == PodCommand.RTS.rawValue
+        let isO5Start = podType.isO5
+            && characteristicUUID == profile.dataCharacteristicUUID
+            && value.first == 0
+        guard isDashStart || isO5Start else { return }
+
+        log.default("[unsolicited] candidate pod-initiated transfer while idle: char=%{public}@ first=0x%{public}02x len=%{public}d raw=%{public}@",
+                    characteristicUUID.uuidString, value.first ?? 0, value.count, value.hexadecimalString)
+
+        runSession(withName: "UnsolicitedReceive") { [weak self] in
+            guard let self = self else { return }
+            // A real command may have been scheduled and flushed the queues before this
+            // serialized op ran.
+            guard PeripheralManager.unsolicitedFaultListenerEnabled, self.peripheral.state == .connected else { return }
+            do {
+                guard let packet = try self.readMessagePacket() else {
+                    self.log.default("[unsolicited] no packet assembled (likely flushed by an intervening command)")
+                    return
+                }
+                self.log.default("[unsolicited] assembled packet: type=%{public}@ seq=%{public}d encPayloadLen=%{public}d encPayload=%{public}@",
+                                 String(describing: packet.type), packet.sequenceNumber, packet.payload.count, packet.payload.hexadecimalString)
+                self.delegate?.peripheralManager(self, didReceiveUnsolicitedMessagePacket: packet)
+            } catch {
+                self.log.error("[unsolicited] receive/assemble failed: %{public}@ (peripheral state=%{public}@)",
+                               String(describing: error), String(describing: self.peripheral.state))
+            }
+        }
+    }
+}
