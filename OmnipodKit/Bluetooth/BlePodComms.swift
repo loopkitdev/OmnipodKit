@@ -794,7 +794,12 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
-                configurePeriodicStatus()                 // PROTOTYPE: arm the pod to originate periodic status pushes
+                // DISABLED: SN0.0=60 is not a recognized pod command — the pod returns no
+                // response (emptyValue), which OmnipodKit treats as an unresponsive pod and
+                // DISCONNECTS. On an active pod this loops (reconnect -> SN0.0= -> drop). Do not
+                // send blind command guesses to a live pod. configurePeriodicStatus() retained
+                // for reference but must not run until we have the correct registration command.
+                // configurePeriodicStatus()
                 manager.unsolicitedListenerArmed = true   // encrypted session ready; safe to observe pod-initiated transfers
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
