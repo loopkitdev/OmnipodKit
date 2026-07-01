@@ -41,7 +41,14 @@ class BlePodComms: PodComms {
         } else {
             bluetoothManager.setUuidPdmId(nil)
         }
-        if let podState = podState, let bleIdentifier = podState.bleIdentifier {
+        // Only re-arm the background auto-connect for a pod we can still use. A pod that
+        // FAULTED before finishing activation is dead/discarded: keeping its bleIdentifier in
+        // autoConnectIDs makes CoreBluetooth chase it with an untimed connect() that never
+        // completes, which starves didConnect for a newly-paired pod and blocks pairing a new
+        // pod until the pump manager is removed and re-added. A fully set-up pod is still
+        // auto-connected even if faulted, so it can be read and deactivated.
+        if let podState = podState, let bleIdentifier = podState.bleIdentifier,
+           podState.isSetupComplete || !podState.isFaulted {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
         }
     }
