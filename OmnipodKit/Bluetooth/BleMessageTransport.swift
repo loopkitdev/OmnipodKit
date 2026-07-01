@@ -596,6 +596,69 @@ class BlePodMessageTransport: MessageTransport {
         return responseData
     }
 
+    /// Send a STANDARD SLPE (2-byte length-prefixed) S…=/,G… command and parse the
+    /// length-prefixed response with parseKeys. This matches how standard S0.0=…,G0.0 commands
+    /// are framed (unlike sendO5AidCommand, which is plain-ASCII AID with a bare prefix-strip).
+    /// Uses a NON-disconnecting read so an unrecognized/unparseable command (silent pod) logs a
+    /// failure instead of dropping a live pod.
+    func sendSlpeGetSetCommand(keys: [String], payloads: [Data], responseKeys: [String]) throws -> [Data] {
+        guard let enDecrypt = self.enDecrypt else {
+            throw PodCommsError.podNotConnected
+        }
+        guard manager.peripheral.state == .connected else {
+            throw PodCommsError.podNotConnected
+        }
+
+        let wrappedPayload = StringLengthPrefixEncoding.formatKeys(keys: keys, payloads: payloads)
+
+        incrementMsgSeq()
+        let msg = MessagePacket(
+            type: MessageType.ENCRYPTED,
+            source: self.myId,
+            destination: self.podId,
+            payload: wrappedPayload,
+            sequenceNumber: UInt8(msgSeq),
+            eqos: 1
+        )
+        incrementNonceSeq()
+        let encrypted = try enDecrypt.encrypt(msg, nonceSeq)
+
+        log.default("SLPE Send (%{public}d bytes): %{public}@", wrappedPayload.count, wrappedPayload.hexadecimalString)
+        messageLogger?.didSend(wrappedPayload)
+
+        let writeResult = manager.sendMessagePacket(encrypted)
+        switch writeResult {
+        case .sentWithAcknowledgment:
+            break
+        case .sentWithError(let error):
+            throw PodCommsError.commsError(error: error)
+        case .unsentWithError(let error):
+            throw PodCommsError.commsError(error: error)
+        }
+
+        // NON-disconnecting read: a silent pod (unparseable/unknown command) must NOT drop the link.
+        guard let readMessage = try manager.readMessagePacket(disconnectOnUnresponsivePod: false) else {
+            throw PodProtocolError.messageIOException("No SLPE response (pod silent)")
+        }
+
+        incrementNonceSeq()
+        let decrypted = try enDecrypt.decrypt(readMessage, nonceSeq)
+
+        log.default("SLPE RawResp: type=%{public}@ seq=%{public}d len=%{public}d hex=%{public}@ ascii=%{public}@ respKeys=%{public}@",
+                    String(describing: decrypted.type), decrypted.sequenceNumber, decrypted.payload.count,
+                    decrypted.payload.hexadecimalString, String(data: decrypted.payload, encoding: .utf8) ?? "<non-ascii>", responseKeys.joined())
+
+        // ACK the response before parsing, so a parse failure still leaves the pod acknowledged.
+        incrementMsgSeq()
+        incrementNonceSeq()
+        let ack = try getAck(response: decrypted)
+        if case .sentWithAcknowledgment = manager.sendMessagePacket(ack) {} else {
+            log.error("SLPE: could not send ACK for response")
+        }
+
+        return try StringLengthPrefixEncoding.parseKeys(responseKeys, decrypted.payload)
+    }
+
     func assertOnSessionQueue() {
         dispatchPrecondition(condition: .onQueue(manager.queue))
     }

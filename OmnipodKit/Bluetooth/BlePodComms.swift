@@ -381,21 +381,28 @@ class BlePodComms: PodComms {
             podState!.bleMessageTransportState = BleMessageTransportState(ck: transport.ck, noncePrefix: transport.noncePrefix, msgSeq: transport.msgSeq, nonceSeq: transport.nonceSeq, messageNumber: transport.messageNumber)
         }
 
-        let feature = "N0", attribute = "0"
-        let payload = O5AidCommands.setGetPayload(feature: feature, attribute: attribute, data: String(intervalSeconds))
-        let respPrefix = O5AidCommands.responsePrefix(feature: feature, attribute: attribute)
+        // SN0.0= is structurally a STANDARD S…= command, so it uses SLPE (2-byte length-prefixed)
+        // encoding via formatKeys — NOT the plain-ASCII AID path (the earlier bug). The value "60"
+        // is length-prefixed under the "SN0.0=" key; the trailing get-key ",GN0.0" has no value.
+        // Response is the length-prefixed "N0.0=" key, parsed with parseKeys. The read is
+        // non-disconnecting, so a still-wrong guess logs a failure instead of looping a live pod.
+        let keys = ["SN0.0=", ",GN0.0"]
+        let payloads = [Data(String(intervalSeconds).utf8), Data()]
+        let respKeys = ["N0.0="]
+        let wrapped = StringLengthPrefixEncoding.formatKeys(keys: keys, payloads: payloads)
         log.default("[periodic] pre-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d eapSeq=%{public}d bleId=%{public}@",
                     transport.nonceSeq, transport.msgSeq, transport.messageNumber, transport.eapSeq, podState?.bleIdentifier ?? "?")
-        log.default("[periodic] register attempt: S%{public}@.%{public}@=%{public}d ascii=%{public}@ hex=%{public}@ respPrefix=%{public}@",
-                    feature, attribute, intervalSeconds, String(data: payload, encoding: .utf8) ?? "?", payload.hexadecimalString, respPrefix)
+        log.default("[periodic] register attempt (SLPE): keys=%{public}@ seconds=%{public}d wrappedHex=%{public}@ respKeys=%{public}@",
+                    keys.joined(), intervalSeconds, wrapped.hexadecimalString, respKeys.joined())
         do {
-            let response = try transport.sendO5AidCommand(payload, responsePrefix: respPrefix)
-            log.default("[periodic] register ACCEPTED. response ascii=%{public}@ hex=%{public}@",
-                        String(data: response, encoding: .utf8) ?? "?", response.hexadecimalString)
+            let values = try transport.sendSlpeGetSetCommand(keys: keys, payloads: payloads, responseKeys: respKeys)
+            let v = values.first ?? Data()
+            log.default("[periodic] register ACCEPTED (SLPE). value ascii=%{public}@ hex=%{public}@",
+                        String(data: v, encoding: .utf8) ?? "?", v.hexadecimalString)
         } catch {
-            log.error("[periodic] register REJECTED/failed: %{public}@ — see [O5 AID RawResp] above for the pod's actual bytes; iterate feature/attr/encoding.", String(describing: error))
+            log.error("[periodic] register failed: %{public}@ — non-disconnecting (pod NOT dropped); see [SLPE RawResp] above if the pod responded.", String(describing: error))
         }
-        log.default("[periodic] post-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d (a healthy exchange advances msgSeq+2, nonceSeq+3)",
+        log.default("[periodic] post-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d (a full exchange advances msgSeq+2, nonceSeq+3)",
                     transport.nonceSeq, transport.msgSeq, transport.messageNumber)
     }
 
@@ -794,12 +801,10 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
-                // DISABLED: SN0.0=60 is not a recognized pod command — the pod returns no
-                // response (emptyValue), which OmnipodKit treats as an unresponsive pod and
-                // DISCONNECTS. On an active pod this loops (reconnect -> SN0.0= -> drop). Do not
-                // send blind command guesses to a live pod. configurePeriodicStatus() retained
-                // for reference but must not run until we have the correct registration command.
-                // configurePeriodicStatus()
+                // Re-enabled with the corrected SLPE encoding + a non-disconnecting read. The
+                // earlier plain-ASCII attempt sent an unparseable frame → pod silent → disconnect
+                // loop. If SLPE is still wrong the read no longer drops the pod (logs + continues).
+                configurePeriodicStatus()
                 manager.unsolicitedListenerArmed = true   // encrypted session ready; safe to observe pod-initiated transfers
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
