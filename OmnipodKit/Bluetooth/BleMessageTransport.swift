@@ -659,6 +659,46 @@ class BlePodMessageTransport: MessageTransport {
         return try StringLengthPrefixEncoding.parseKeys(responseKeys, decrypted.payload)
     }
 
+    /// Send a STANDARD SLPE command with NO synchronous read — for fire-and-forget commands like
+    /// periodic-status registration, where the pod sends no immediate reply and success is the
+    /// write being ACK'd (the real confirmation arrives later as an unsolicited push). Advances
+    /// msgSeq+1/nonceSeq+1 for the send only; the pod advances the same on receipt, so comms stay
+    /// in sync. Throws only if the write itself is not acknowledged.
+    func sendSlpeCommandFireAndForget(keys: [String], payloads: [Data]) throws {
+        guard let enDecrypt = self.enDecrypt else {
+            throw PodCommsError.podNotConnected
+        }
+        guard manager.peripheral.state == .connected else {
+            throw PodCommsError.podNotConnected
+        }
+
+        let wrappedPayload = StringLengthPrefixEncoding.formatKeys(keys: keys, payloads: payloads)
+
+        incrementMsgSeq()
+        let msg = MessagePacket(
+            type: MessageType.ENCRYPTED,
+            source: self.myId,
+            destination: self.podId,
+            payload: wrappedPayload,
+            sequenceNumber: UInt8(msgSeq),
+            eqos: 1
+        )
+        incrementNonceSeq()
+        let encrypted = try enDecrypt.encrypt(msg, nonceSeq)
+
+        log.default("SLPE Send (fire-and-forget, %{public}d bytes): %{public}@", wrappedPayload.count, wrappedPayload.hexadecimalString)
+        messageLogger?.didSend(wrappedPayload)
+
+        switch manager.sendMessagePacket(encrypted) {
+        case .sentWithAcknowledgment:
+            return
+        case .sentWithError(let error):
+            throw PodCommsError.commsError(error: error)
+        case .unsentWithError(let error):
+            throw PodCommsError.commsError(error: error)
+        }
+    }
+
     func assertOnSessionQueue() {
         dispatchPrecondition(condition: .onQueue(manager.queue))
     }

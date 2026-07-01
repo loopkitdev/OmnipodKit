@@ -372,37 +372,36 @@ class BlePodComms: PodComms {
             return
         }
 
-        let intervalSeconds = 60   // GUESS: push cadence
+        let intervalSeconds = 10   // ~10s so the first push arrives quickly while testing (was 60)
 
         let transport = BlePodMessageTransport(manager: manager, myId: myId, podId: podId, state: podState!.bleMessageTransportState, signingKey: podState?.signingKey)
         transport.messageLogger = messageLogger
         defer {
-            // Persist the sequence advance from this command so normal comms stay in sync.
+            // Persist the sequence advance from the send so normal comms stay in sync.
             podState!.bleMessageTransportState = BleMessageTransportState(ck: transport.ck, noncePrefix: transport.noncePrefix, msgSeq: transport.msgSeq, nonceSeq: transport.nonceSeq, messageNumber: transport.messageNumber)
         }
 
-        // SN0.0= is structurally a STANDARD S…= command, so it uses SLPE (2-byte length-prefixed)
-        // encoding via formatKeys — NOT the plain-ASCII AID path (the earlier bug). The value "60"
-        // is length-prefixed under the "SN0.0=" key; the trailing get-key ",GN0.0" has no value.
-        // Response is the length-prefixed "N0.0=" key, parsed with parseKeys. The read is
-        // non-disconnecting, so a still-wrong guess logs a failure instead of looping a live pod.
+        // SN0.0= is a STANDARD S…= command (SLPE, 2-byte length-prefixed): the interval value is
+        // length-prefixed under "SN0.0=", the trailing get-key ",GN0.0" is empty. Registration is
+        // FIRE-AND-FORGET — the pod sends NO synchronous reply, so we do not read one (reading always
+        // timed out with emptyValue, a false negative). Success = the write is ACK'd; the real
+        // confirmation is the pod's first unsolicited PUSH ~intervalSeconds later, caught by the
+        // unsolicited listener.
         let keys = ["SN0.0=", ",GN0.0"]
         let payloads = [Data(String(intervalSeconds).utf8), Data()]
-        let respKeys = ["N0.0="]
         let wrapped = StringLengthPrefixEncoding.formatKeys(keys: keys, payloads: payloads)
         log.default("[periodic] pre-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d eapSeq=%{public}d bleId=%{public}@",
                     transport.nonceSeq, transport.msgSeq, transport.messageNumber, transport.eapSeq, podState?.bleIdentifier ?? "?")
-        log.default("[periodic] register attempt (SLPE): keys=%{public}@ seconds=%{public}d wrappedHex=%{public}@ respKeys=%{public}@",
-                    keys.joined(), intervalSeconds, wrapped.hexadecimalString, respKeys.joined())
+        log.default("[periodic] register (fire-and-forget SLPE): keys=%{public}@ seconds=%{public}d wrappedHex=%{public}@ — success=write-ACK; watch [unsolicited] for a push in ~%{public}ds",
+                    keys.joined(), intervalSeconds, wrapped.hexadecimalString, intervalSeconds)
         do {
-            let values = try transport.sendSlpeGetSetCommand(keys: keys, payloads: payloads, responseKeys: respKeys)
-            let v = values.first ?? Data()
-            log.default("[periodic] register ACCEPTED (SLPE). value ascii=%{public}@ hex=%{public}@",
-                        String(data: v, encoding: .utf8) ?? "?", v.hexadecimalString)
+            try transport.sendSlpeCommandFireAndForget(keys: keys, payloads: payloads)
+            log.default("[periodic] register write ACK'd — pod received SN0.0=%{public}d. Expecting an unsolicited push in ~%{public}ds (the push, not a reply, is the success signal).",
+                        intervalSeconds, intervalSeconds)
         } catch {
-            log.error("[periodic] register failed: %{public}@ — non-disconnecting (pod NOT dropped); see [SLPE RawResp] above if the pod responded.", String(describing: error))
+            log.error("[periodic] register send NOT ACK'd: %{public}@", String(describing: error))
         }
-        log.default("[periodic] post-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d (a full exchange advances msgSeq+2, nonceSeq+3)",
+        log.default("[periodic] post-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d",
                     transport.nonceSeq, transport.msgSeq, transport.messageNumber)
     }
 
