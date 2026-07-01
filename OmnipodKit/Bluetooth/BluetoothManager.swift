@@ -140,15 +140,28 @@ class BluetoothManager: NSObject {
     // MARK: - Synchronization
     private let managerQueue = DispatchQueue(label: "com.OmnipodKit.bluetoothManagerQueue", qos: .unspecified)
 
+    /// Per-instance ID so multiple centrals under the shared "com.OmnipodKit" restore identifier
+    /// can be told apart in the log. INIT/DEINIT + the central callbacks are all tagged with it:
+    /// N distinct INITs with no matching DEINITs = leaked centrals (the suspected pairing-bug root).
+    let instanceID = String(UUID().uuidString.prefix(8))
+
     init(podType: PodType) {
         self.podType = podType
         super.init()
+
+        log.default("BluetoothManager #%{public}@ INIT (podType=%{public}@). Created from:\n%{public}@",
+                    instanceID, String(describing: podType),
+                    Thread.callStackSymbols.dropFirst().prefix(12).joined(separator: "\n"))
 
         managerQueue.sync {
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])
         }
     }
-    
+
+    deinit {
+        log.default("BluetoothManager #%{public}@ DEINIT", instanceID)
+    }
+
     @discardableResult
     private func addPeripheral(_ peripheral: CBPeripheral, podAdvertisement: PodAdvertisement?) -> Omni {
         dispatchPrecondition(condition: .onQueue(managerQueue))
@@ -334,7 +347,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
-        log.default("%{public}@: %{public}@", #function, String(describing: central.state.rawValue))
+        log.default("[#%{public}@] %{public}@: %{public}@", instanceID, #function, String(describing: central.state.rawValue))
 
         if case .poweredOn = central.state {
             // bluetooth may have reset; update peripheral references
@@ -353,7 +366,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 if let uuid = UUID(uuidString: uuidString),
                    let peripheral = central.retrievePeripherals(withIdentifiers: [uuid]).first
                 {
-                    log.default("Recovered peripheral from autoConnectIDs: %{public}@", uuidString)
+                    log.default("[#%{public}@] Recovered peripheral from autoConnectIDs: %{public}@", instanceID, uuidString)
                     addPeripheral(peripheral, podAdvertisement: nil)
                     central.connect(peripheral, options: nil)
                 }
