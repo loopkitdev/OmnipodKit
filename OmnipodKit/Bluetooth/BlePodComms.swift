@@ -346,6 +346,44 @@ class BlePodComms: PodComms {
         // The podState's bleMessageTransportState will be updated when the above defer block is executed.
     }
 
+    // MARK: - PROTOTYPE: periodic-status registration (arms the pod to push)
+
+    /// BEST-GUESS, UNCONFIRMED envelope. Registers a periodic status push so the pod ORIGINATES
+    /// status-response frames on a schedule (caught by the unsolicited listener), with fault/alert
+    /// flags riding inside — "register once, don't poll". Called post-session-establishment while
+    /// holding podStateLock. Non-fatal: a rejection is logged so we can iterate the envelope.
+    ///
+    /// The exact wire form is unconfirmed. Current guesses (each a labeled knob to iterate from
+    /// field logs): command `SN0.0=<seconds>,GN0.0` (feature "N0", attr "0", ASCII decimal
+    /// seconds), response prefix `N0.0=`. If REJECTED, try: a different feature/attr split, binary
+    /// vs ASCII seconds, or the standard `S0.0=` envelope.
+    private func configurePeriodicStatus() {
+        guard PeripheralManager.unsolicitedFaultListenerEnabled else { return }
+        guard let manager = manager, podState != nil else { return }
+
+        let intervalSeconds = 60   // GUESS: push cadence
+
+        let transport = BlePodMessageTransport(manager: manager, myId: myId, podId: podId, state: podState!.bleMessageTransportState, signingKey: podState?.signingKey)
+        transport.messageLogger = messageLogger
+        defer {
+            // Persist the sequence advance from this command so normal comms stay in sync.
+            podState!.bleMessageTransportState = BleMessageTransportState(ck: transport.ck, noncePrefix: transport.noncePrefix, msgSeq: transport.msgSeq, nonceSeq: transport.nonceSeq, messageNumber: transport.messageNumber)
+        }
+
+        let feature = "N0", attribute = "0"
+        let payload = O5AidCommands.setGetPayload(feature: feature, attribute: attribute, data: String(intervalSeconds))
+        let respPrefix = O5AidCommands.responsePrefix(feature: feature, attribute: attribute)
+        log.default("[periodic] register attempt: S%{public}@.%{public}@=%{public}d ascii=%{public}@ hex=%{public}@ respPrefix=%{public}@",
+                    feature, attribute, intervalSeconds, String(data: payload, encoding: .utf8) ?? "?", payload.hexadecimalString, respPrefix)
+        do {
+            let response = try transport.sendO5AidCommand(payload, responsePrefix: respPrefix)
+            log.default("[periodic] register ACCEPTED. response ascii=%{public}@ hex=%{public}@",
+                        String(data: response, encoding: .utf8) ?? "?", response.hexadecimalString)
+        } catch {
+            log.error("[periodic] register REJECTED/failed: %{public}@ — envelope guess likely wrong; iterate feature/attr/encoding.", String(describing: error))
+        }
+    }
+
     // MARK: - O5 Specific AID Setup commands
 
     /// Sends the O5-specific AID setup commands between GetStatus and SetupPod.
@@ -741,6 +779,7 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
+                configurePeriodicStatus()                 // PROTOTYPE: arm the pod to originate periodic status pushes
                 manager.unsolicitedListenerArmed = true   // encrypted session ready; safe to observe pod-initiated transfers
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
@@ -791,13 +830,21 @@ extension BlePodComms {
             guard seq >= 0 else { continue }
             do {
                 let decrypted = try enDecrypt.decrypt(packet, seq)
-                log.default("[unsolicited] DECRYPT OK at nonceSeq=%{public}d (delta=%{public}d). decryptedPayloadLen=%{public}d decryptedPayload=%{public}@",
-                            seq, delta, decrypted.payload.count, decrypted.payload.hexadecimalString)
-                // STAGE 1 ENDS HERE — log only. We deliberately do NOT advance live
-                // nonceSeq/msgSeq/messageNumber and do NOT route the alert, because the
-                // correct advancement (and whether pods push these at all) is exactly what
-                // these field logs confirm. STAGE 2: advance bleMessageTransportState by the
-                // proven delta and feed `decrypted` through parseResponse -> fault handling.
+                log.default("[unsolicited] DECRYPT OK at nonceSeq=%{public}d (delta=%{public}d). decryptedPayloadLen=%{public}d decryptedPayload=%{public}@ decryptedASCII=%{public}@",
+                            seq, delta, decrypted.payload.count, decrypted.payload.hexadecimalString, String(data: decrypted.payload, encoding: .utf8) ?? "<non-ascii>")
+                // STAGE 2a: commit the nonce advance so the NEXT command stays in sync — the pod
+                // advanced its nonce for this push. Data-driven: use the offset that decrypted
+                // (expected +1). Runs on the serial sessionQueue, so no command overlaps this.
+                podStateLock.lock()
+                if var committed = podState?.bleMessageTransportState {
+                    let before = committed.nonceSeq
+                    committed.nonceSeq = seq
+                    podState?.bleMessageTransportState = committed
+                    log.default("[unsolicited] committed nonceSeq %{public}d -> %{public}d (delta=%{public}d)", before, seq, delta)
+                }
+                podStateLock.unlock()
+                // STAGE 2b (TODO once decrypt is confirmed in the field): parse `decrypted` as a
+                // status/DetailedStatus response and route a fault via notifyPodFault.
                 return
             } catch {
                 log.debug("[unsolicited] decrypt miss at nonceSeq=%{public}d (delta=%{public}d): %{public}@", seq, delta, String(describing: error))
