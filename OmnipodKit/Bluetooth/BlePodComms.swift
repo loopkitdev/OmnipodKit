@@ -384,6 +384,8 @@ class BlePodComms: PodComms {
         let feature = "N0", attribute = "0"
         let payload = O5AidCommands.setGetPayload(feature: feature, attribute: attribute, data: String(intervalSeconds))
         let respPrefix = O5AidCommands.responsePrefix(feature: feature, attribute: attribute)
+        log.default("[periodic] pre-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d eapSeq=%{public}d bleId=%{public}@",
+                    transport.nonceSeq, transport.msgSeq, transport.messageNumber, transport.eapSeq, podState?.bleIdentifier ?? "?")
         log.default("[periodic] register attempt: S%{public}@.%{public}@=%{public}d ascii=%{public}@ hex=%{public}@ respPrefix=%{public}@",
                     feature, attribute, intervalSeconds, String(data: payload, encoding: .utf8) ?? "?", payload.hexadecimalString, respPrefix)
         do {
@@ -391,8 +393,10 @@ class BlePodComms: PodComms {
             log.default("[periodic] register ACCEPTED. response ascii=%{public}@ hex=%{public}@",
                         String(data: response, encoding: .utf8) ?? "?", response.hexadecimalString)
         } catch {
-            log.error("[periodic] register REJECTED/failed: %{public}@ — envelope guess likely wrong; iterate feature/attr/encoding.", String(describing: error))
+            log.error("[periodic] register REJECTED/failed: %{public}@ — see [O5 AID RawResp] above for the pod's actual bytes; iterate feature/attr/encoding.", String(describing: error))
         }
+        log.default("[periodic] post-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d (a healthy exchange advances msgSeq+2, nonceSeq+3)",
+                    transport.nonceSeq, transport.msgSeq, transport.messageNumber)
     }
 
     // MARK: - O5 Specific AID Setup commands
@@ -843,6 +847,17 @@ extension BlePodComms {
                 let decrypted = try enDecrypt.decrypt(packet, seq)
                 log.default("[unsolicited] DECRYPT OK at nonceSeq=%{public}d (delta=%{public}d). decryptedPayloadLen=%{public}d decryptedPayload=%{public}@ decryptedASCII=%{public}@",
                             seq, delta, decrypted.payload.count, decrypted.payload.hexadecimalString, String(data: decrypted.payload, encoding: .utf8) ?? "<non-ascii>")
+                // Best-effort decode so a real fault push shows its structure (StatusResponse /
+                // DetailedStatus / PodInfoResponse), not just hex. Non-fatal; raw bytes logged above.
+                if let message = try? Message(encodedData: decrypted.payload, checkCRC: manager.podType.isO5) {
+                    log.default("[unsolicited] decoded blocks=[%{public}@]",
+                                message.messageBlocks.map { String(describing: $0.blockType) }.joined(separator: ", "))
+                    for block in message.messageBlocks {
+                        log.default("[unsolicited]   block: %{public}@", String(describing: block))
+                    }
+                } else {
+                    log.default("[unsolicited] payload did not parse as a pod Message (may be an AID/text frame or partial)")
+                }
                 // STAGE 2a: commit the nonce advance so the NEXT command stays in sync — the pod
                 // advanced its nonce for this push. Data-driven: use the offset that decrypted
                 // (expected +1). Runs on the serial sessionQueue, so no command overlaps this.
