@@ -360,6 +360,17 @@ class BlePodComms: PodComms {
     private func configurePeriodicStatus() {
         guard PeripheralManager.unsolicitedFaultListenerEnabled else { return }
         guard let manager = manager, podState != nil else { return }
+        // Only on a healthy, fully-set-up pod. Never during pairing/activation, and never
+        // on a faulted pod — otherwise this fires on every reconnect of a screaming pod and
+        // adds SN0.0= writes to a connect/disconnect loop.
+        guard podState?.isSetupComplete == true else {
+            log.default("[periodic] skip registration: pod setup not complete")
+            return
+        }
+        guard podState?.fault == nil else {
+            log.default("[periodic] skip registration: pod is faulted")
+            return
+        }
 
         let intervalSeconds = 60   // GUESS: push cadence
 
