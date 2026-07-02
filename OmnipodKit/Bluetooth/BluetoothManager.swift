@@ -174,6 +174,21 @@ class BluetoothManager: NSObject {
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
     static let beaconUUIDPrefix = "CE1F923D-C539-48EA-7300-0A"
 
+    /// Low-power fault-watch (option 3): scan filtered on the DASH ALARM service UUID(s) with
+    /// allowDuplicates OFF, so iOS only wakes us when the pod enters an alarm state (2nd service
+    /// UUID flips to an alarm value) — zero wakes during normal operation, and it survives into the
+    /// background via State Preservation/Restoration. Takes precedence over the monitor/beacon scans.
+    /// Trade-off: only catches the enumerated alarm UUIDs below (currently just the one confirmed
+    /// alert value); the clear transition isn't caught here (confirm on the next connect). See
+    /// DASH_BEACON_FINDINGS.md. Add more alarm UUID values as they're discovered.
+    static var lowPowerMonitorEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
+    }
+
+    /// Known DASH alarm-state 16-bit service UUIDs (the 2nd UUID while alerting). `C005` = confirmed
+    /// (expiration reminder); extend as more alert/alarm types are captured.
+    static let alarmServiceUUIDs = [CBUUID(string: "C005")]
+
     /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
     private var connectRequestedAt: [String: Date] = [:]
 
@@ -360,16 +375,26 @@ class BluetoothManager: NSObject {
         } else {
             serviceUUID = podType.blePodProfile.advertisementServiceUUID
         }
-        // Monitor/beacon mode: allowDuplicates so we see the advertisement cadence (foreground only —
-        // iOS coalesces duplicates in the background).
-        let options: [String: Any] = (BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled)
-            ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
-        // §5: scan withServices:nil so we catch a beacon advertising a UUID we don't yet filter on.
-        // Wildcard is foreground-only; the whole point of §5 is to discover the stable filter UUID.
-        let services: [CBUUID]? = BluetoothManager.beaconCaptureEnabled ? nil : [serviceUUID]
-        log.default("Start scanning (filter=%{public}@, advertisementMonitor=%{public}@, beaconCapture=%{public}@, allowDuplicates=%{public}@)",
-                    services == nil ? "nil (wildcard)" : serviceUUID.uuidString,
-                    String(describing: BluetoothManager.advertisementMonitorEnabled),
+        let services: [CBUUID]?
+        let options: [String: Any]
+        if BluetoothManager.lowPowerMonitorEnabled {
+            // Option 3: wake only on an alarm-state advertisement. Filter on the alarm UUID(s), no
+            // allowDuplicates. Takes precedence over the monitor/beacon scans.
+            services = BluetoothManager.alarmServiceUUIDs
+            options = [:]
+        } else if BluetoothManager.beaconCaptureEnabled {
+            // §5: scan withServices:nil (wildcard) + allowDuplicates so we catch a beacon advertising
+            // a UUID we don't yet filter on. Foreground-only (the point of §5 is to find the filter UUID).
+            services = nil
+            options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        } else {
+            // Monitor mode: filter on the pod's main service; allowDuplicates to see the advert cadence.
+            services = [serviceUUID]
+            options = BluetoothManager.advertisementMonitorEnabled ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
+        }
+        log.default("Start scanning (filter=%{public}@, lowPowerMonitor=%{public}@, beaconCapture=%{public}@, allowDuplicates=%{public}@)",
+                    services == nil ? "nil (wildcard)" : services!.map { $0.uuidString }.joined(separator: ","),
+                    String(describing: BluetoothManager.lowPowerMonitorEnabled),
                     String(describing: BluetoothManager.beaconCaptureEnabled),
                     String(describing: options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil))
         manager.scanForPeripherals(withServices: services, options: options)
@@ -384,7 +409,7 @@ class BluetoothManager: NSObject {
     /// during the connect because an active allowDuplicates scan starves connection completion).
     /// Only when nothing is connected, so we never scan while a command is using the link.
     private func resumeScanIfNeeded() {
-        guard BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled else { return }
+        guard BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled || BluetoothManager.lowPowerMonitorEnabled else { return }
         guard manager?.state == .poweredOn, !manager.isScanning else { return }
         guard !devices.contains(where: { $0.manager.peripheral.state == .connected || $0.manager.peripheral.state == .connecting }) else { return }
         log.default("[connectOnDemand] resuming scan after connect attempt")
