@@ -358,10 +358,21 @@ extension PeripheralManager {
     func connectOnDemand(timeout: TimeInterval) throws {
         guard peripheral.state != .connected else { return }
         log.default("[connectOnDemand] connecting on demand (state=%{public}d, timeout=%{public}ds)", peripheral.state.rawValue, Int(timeout))
+        // An active scan — especially allowDuplicates / wildcard — starves connection completion on
+        // iOS (didConnect never fires). Stop scanning for the duration of the connect; BluetoothManager
+        // resumes it on didConnect-then-disconnect / didFailToConnect.
+        central?.stopScan()
         let start = Date()
-        try runCommand(timeout: timeout, allowDisconnected: true) {
-            addCondition(.connect)
-            central?.connect(peripheral, options: nil)
+        do {
+            try runCommand(timeout: timeout, allowDisconnected: true) {
+                addCondition(.connect)
+                central?.connect(peripheral, options: nil)
+            }
+        } catch {
+            // Unstick a connect that never completed, so didDisconnect/didFailToConnect fires
+            // (which resumes the scan) instead of leaving it wedged in .connecting.
+            central?.cancelPeripheralConnection(peripheral)
+            throw error
         }
         log.default("[connectOnDemand] connected in %{public}@s", String(format: "%.3f", Date().timeIntervalSince(start)))
     }

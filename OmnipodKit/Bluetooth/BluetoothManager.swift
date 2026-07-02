@@ -377,6 +377,17 @@ class BluetoothManager: NSObject {
         manager.stopScan()
     }
 
+    /// Resume the monitor/beacon scan after a connect attempt ends (connect-on-demand stops the scan
+    /// during the connect because an active allowDuplicates scan starves connection completion).
+    /// Only when nothing is connected, so we never scan while a command is using the link.
+    private func resumeScanIfNeeded() {
+        guard BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled else { return }
+        guard manager?.state == .poweredOn, !manager.isScanning else { return }
+        guard !devices.contains(where: { $0.manager.peripheral.state == .connected || $0.manager.peripheral.state == .connecting }) else { return }
+        log.default("[connectOnDemand] resuming scan after connect attempt")
+        startScanning()
+    }
+
     // MARK: - Accessors
 
     func getConnectedDevices() -> [Omni] {
@@ -574,6 +585,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.debug("Reconnecting disconnected autoconnect peripheral")
             autoReconnect(peripheral)
         }
+        resumeScanIfNeeded()
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -586,5 +598,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
             autoReconnect(peripheral)
         }
+        resumeScanIfNeeded()
     }
 }
