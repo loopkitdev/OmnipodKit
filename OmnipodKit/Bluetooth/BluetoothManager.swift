@@ -145,6 +145,24 @@ class BluetoothManager: NSObject {
     /// N distinct INITs with no matching DEINITs = leaked centrals (the suspected pairing-bug root).
     let instanceID = String(UUID().uuidString.prefix(8))
 
+    /// Field-test flag: keep scanning continuously (allowDuplicates) and log every pod advertisement,
+    /// to test the "stay scanning, connect on demand, faults signalled via advertisement" model.
+    static var advertisementMonitorEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.advertisementMonitorEnabled") as? Bool ?? true
+    }
+
+    /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
+    private var connectRequestedAt: [String: Date] = [:]
+
+    /// Stamp the connect time and issue the connect, so didConnect can report the latency.
+    private func timedConnect(_ peripheral: CBPeripheral) {
+        if connectRequestedAt[peripheral.identifier.uuidString] == nil {
+            connectRequestedAt[peripheral.identifier.uuidString] = Date()
+        }
+        let cm: CBCentralManager = manager
+        cm.connect(peripheral, options: nil)
+    }
+
     init(podType: PodType) {
         self.podType = podType
         super.init()
@@ -222,7 +240,7 @@ class BluetoothManager: NSObject {
             {
                 self.log.default("connectToDevice: retrieved peripheral %{public}@ via retrievePeripherals", uuidString)
                 self.addPeripheral(peripheral, podAdvertisement: nil)
-                self.manager.connect(peripheral, options: nil)
+                self.timedConnect(peripheral)
             }
         }
     }
@@ -240,7 +258,7 @@ class BluetoothManager: NSObject {
             }
             let device = addPeripheral(peripheral, podAdvertisement: nil)
             autoConnectIDs.insert(uuidString)
-            manager.connect(peripheral, options: nil)
+            timedConnect(peripheral)
             log.default("retrieveAndConnectKnownPod: initiating connection to %{public}@", peripheral)
             result = device
         }
@@ -264,7 +282,7 @@ class BluetoothManager: NSObject {
             if autoConnectIDs.contains(peripheral.identifier.uuidString) {
                 if peripheral.state == .disconnected || peripheral.state == .disconnecting {
                     log.info("updateConnections: Connecting to peripheral: %{public}@", peripheral)
-                    manager.connect(peripheral, options: nil)
+                    timedConnect(peripheral)
                 }
             } else {
                 if peripheral.state == .connected || peripheral.state == .connecting {
@@ -291,7 +309,7 @@ class BluetoothManager: NSObject {
             let peripheral = device.manager.peripheral
             if peripheral.state == .disconnected || peripheral.state == .disconnecting {
                 log.info("discoverPods: Connecting to peripheral: %{public}@", peripheral)
-                manager.connect(peripheral, options: nil)
+                timedConnect(peripheral)
             }
         }
         startScanning()
@@ -307,8 +325,14 @@ class BluetoothManager: NSObject {
         } else {
             serviceUUID = podType.blePodProfile.advertisementServiceUUID
         }
-        log.default("Start scanning for %{public}@", serviceUUID.uuidString)
-        manager.scanForPeripherals(withServices: [serviceUUID], options: nil)
+        // Monitor mode: allowDuplicates so we see the advertisement cadence (foreground only —
+        // iOS coalesces duplicates in the background).
+        let options: [String: Any] = BluetoothManager.advertisementMonitorEnabled
+            ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
+        log.default("Start scanning for %{public}@ (advertisementMonitor=%{public}@, allowDuplicates=%{public}@)",
+                    serviceUUID.uuidString, String(describing: BluetoothManager.advertisementMonitorEnabled),
+                    String(describing: options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil))
+        manager.scanForPeripherals(withServices: [serviceUUID], options: options)
     }
 
     private func stopScanning() {
@@ -355,7 +379,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 if let newPeripheral = central.retrievePeripherals(withIdentifiers: [device.manager.peripheral.identifier]).first {
                     log.debug("Re-connecting to known peripheral %{public}@", newPeripheral.identifier.uuidString)
                     device.manager.peripheral = newPeripheral
-                    central.connect(newPeripheral)
+                    timedConnect(newPeripheral)
                 }
             }
 
@@ -368,13 +392,17 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 {
                     log.default("[#%{public}@] Recovered peripheral from autoConnectIDs: %{public}@", instanceID, uuidString)
                     addPeripheral(peripheral, podAdvertisement: nil)
-                    central.connect(peripheral, options: nil)
+                    timedConnect(peripheral)
                 }
             }
 
             updateConnections()
             
-            if (discoveryModeEnabled || !hasDiscoveredAllAutoConnectDevices) && !manager.isScanning {
+            if BluetoothManager.advertisementMonitorEnabled {
+                // Monitor mode: keep scanning continuously so we observe pod advertisements,
+                // regardless of whether all autoConnect devices are known/connected.
+                if !manager.isScanning { startScanning() }
+            } else if (discoveryModeEnabled || !hasDiscoveredAllAutoConnectDevices) && !manager.isScanning {
                 startScanning()
             } else if !discoveryModeEnabled && manager.isScanning {
                 stopScanning()
@@ -412,7 +440,21 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.debug("%{public}@: %{public}@, %{public}@", #function, peripheral, advertisementData)
 
-        if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+        // Full advertisement dump for pod-identified peripherals — to test the "faults via
+        // advertisement" model: capture every field (esp. the service-UUID list, which changed
+        // between scans early on) + RSSI + connectable + peripheral state, every time.
+        if BluetoothManager.advertisementMonitorEnabled,
+           autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil {
+            let svcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.map { $0.uuidString }.joined(separator: ",") ?? "-"
+            let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
+            let svcData = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?
+                .map { "\($0.key.uuidString):\($0.value.hexadecimalString)" }.joined(separator: ",") ?? "-"
+            let connectable = advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber
+            let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "-"
+            log.default("[ADV] %{public}@ rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
+                        peripheral.identifier.uuidString, RSSI, String(describing: peripheral.state.rawValue),
+                        String(describing: connectable), name, svcUUIDs, mfg, svcData)
+        } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
 
@@ -422,10 +464,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
             if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
                 // Connect to any pairable device, during discovery
                 log.default("Connecting to pairable device %{public} in discovery mode", peripheral)
-                manager.connect(peripheral, options: nil)
+                timedConnect(peripheral)
             } else if autoConnectIDs.contains(peripheral.identifier.uuidString) && peripheral.state == .disconnected {
                 log.debug("Reonnecting to autoconnect device")
-                manager.connect(peripheral, options: nil)
+                timedConnect(peripheral)
             } else {
                 log.info("Ignoring paired or unconnectable peripheral: %{public}@", peripheral)
             }
@@ -433,7 +475,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.info("Ignoring peripheral with unexpected advertisement data: %{public}@", advertisementData)
         }
         
-        if !discoveryModeEnabled && central.isScanning && hasDiscoveredAllAutoConnectDevices {
+        if !BluetoothManager.advertisementMonitorEnabled && !discoveryModeEnabled && central.isScanning && hasDiscoveredAllAutoConnectDevices {
             log.debug("All peripherals discovered")
             stopScanning()
         }
@@ -442,8 +484,15 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
-        log.default("[#%{public}@] CONNECTED: %{public}@ (known device: %{public}@)", instanceID, peripheral,
-                    String(describing: devices.contains { $0.manager.peripheral.identifier == peripheral.identifier }))
+        if let requestedAt = connectRequestedAt.removeValue(forKey: peripheral.identifier.uuidString) {
+            let latency = String(format: "%.3f", Date().timeIntervalSince(requestedAt))
+            log.default("[#%{public}@] CONNECTED: %{public}@ — connect latency %{public}@s (known device: %{public}@)",
+                        instanceID, peripheral, latency,
+                        String(describing: devices.contains { $0.manager.peripheral.identifier == peripheral.identifier }))
+        } else {
+            log.default("[#%{public}@] CONNECTED: %{public}@ — connect latency unknown (no request stamp) (known device: %{public}@)",
+                        instanceID, peripheral, String(describing: devices.contains { $0.manager.peripheral.identifier == peripheral.identifier }))
+        }
 
         // Proxy connection events to peripheral manager
         for device in devices where device.manager.peripheral.identifier == peripheral.identifier {
@@ -470,7 +519,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
             log.debug("Reconnecting disconnected autoconnect peripheral")
-            central.connect(peripheral, options: nil)
+            timedConnect(peripheral)
         }
     }
 
@@ -482,7 +531,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         connectionDelegate?.omnipodPeripheralDidFailToConnect(peripheral: peripheral, error: error)
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
-            central.connect(peripheral, options: nil)
+            timedConnect(peripheral)
         }
     }
 }
