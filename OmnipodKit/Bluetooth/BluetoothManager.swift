@@ -199,6 +199,20 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.suppressCommandsEnabled") as? Bool ?? true
     }
 
+    /// Experiment: after each disconnect, issue a connect with CBConnectPeripheralOptionStartDelayKey
+    /// so iOS holds the request pending for N seconds, then completes it (the pod advertises ~1Hz, so
+    /// it connects ~immediately once the delay elapses). Testing whether a delayed connect gives a
+    /// timed background WAKE — the periodic wake the scan path can't (stable payload coalesces). Loop:
+    /// discover -> delayed-connect(N) -> didConnect (measure) -> brief hold -> disconnect -> repeat.
+    static var delayedConnectProbeEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? true
+    }
+
+    /// Start delay (seconds) for the delayed-connect probe. Starting at 60; goal is ~300 (5 min).
+    static var delayedConnectProbeSeconds: Int {
+        (UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeSeconds") as? Int) ?? 60
+    }
+
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
     /// - `C005`: CONFIRMED 16-bit alarm 2nd-UUID on this pod (expiration reminder). Extend as more
     ///   alert/alarm types are captured.
@@ -215,6 +229,11 @@ class BluetoothManager: NSObject {
     /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
     private var connectRequestedAt: [String: Date] = [:]
 
+    /// Delayed-connect probe: true while a StartDelay connect is in flight (issued, awaiting didConnect),
+    /// so didDiscover doesn't re-issue during the wait; the issue timestamp measures the true delay.
+    private var delayedProbeInFlight = false
+    private var delayedProbeIssuedAt: Date?
+
     /// Stamp the connect time and issue the connect, so didConnect can report the latency.
     private func timedConnect(_ peripheral: CBPeripheral) {
         if connectRequestedAt[peripheral.identifier.uuidString] == nil {
@@ -222,6 +241,21 @@ class BluetoothManager: NSObject {
         }
         let cm: CBCentralManager = manager
         cm.connect(peripheral, options: nil)
+    }
+
+    /// Issue a connect with CBConnectPeripheralOptionStartDelayKey and record the time, for the
+    /// timed-wake experiment. iOS holds the request for `delayedConnectProbeSeconds`, then connects.
+    private func issueDelayedConnectProbe(_ peripheral: CBPeripheral) {
+        guard BluetoothManager.delayedConnectProbeEnabled, !delayedProbeInFlight,
+              peripheral.state == .disconnected else { return }
+        let delay = BluetoothManager.delayedConnectProbeSeconds
+        // Stop the allowDuplicates scan so it doesn't starve the post-delay connect (iOS reacquires the
+        // pod on its own — it advertises ~1Hz). The scan resumes on the probe's disconnect.
+        if manager.isScanning { manager.stopScan() }
+        delayedProbeInFlight = true
+        delayedProbeIssuedAt = Date()
+        log.default("[delayedConnect] issuing connect with StartDelay=%{public}ds for %{public}@", delay, peripheral.identifier.uuidString)
+        manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delay)])
     }
 
     /// The keep-connected auto-reconnect. Suppressed in connect-on-demand mode, where the pod is
@@ -421,6 +455,8 @@ class BluetoothManager: NSObject {
                     String(describing: BluetoothManager.beaconCaptureEnabled),
                     String(describing: options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil))
         manager.scanForPeripherals(withServices: services, options: options)
+        
+        CBConnectPeripheralOptionStartDelayKey
     }
 
     private func stopScanning() {
@@ -610,6 +646,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if isPodFrame {
             detectPodAlertStatus(peripheral: peripheral, advertisementData: advertisementData)
+            // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
+            issueDelayedConnectProbe(peripheral)
         }
 
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
@@ -642,6 +680,20 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // connect). We don't scan while connected; the monitor scan is restored on the next disconnect.
         if manager.isScanning {
             manager.stopScan()
+        }
+
+        // Delayed-connect probe completed: report the measured delay, then disconnect after a brief
+        // hold so the loop re-arms. Skip the normal session proxy — this is a timing probe only.
+        if delayedProbeInFlight {
+            let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?"
+            log.default("[delayedConnect] CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
+                        measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
+            delayedProbeInFlight = false
+            delayedProbeIssuedAt = nil
+            managerQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.manager.cancelPeripheralConnection(peripheral)
+            }
+            return
         }
 
         if let requestedAt = connectRequestedAt.removeValue(forKey: peripheral.identifier.uuidString) {
@@ -681,6 +733,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.debug("Reconnecting disconnected autoconnect peripheral")
             autoReconnect(peripheral)
         }
+        delayedProbeInFlight = false   // re-arm the probe on the next discovery
         resumeScanIfNeeded()
     }
 
@@ -694,6 +747,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
             autoReconnect(peripheral)
         }
+        delayedProbeInFlight = false   // re-arm the probe on the next discovery
         resumeScanIfNeeded()
     }
 }
