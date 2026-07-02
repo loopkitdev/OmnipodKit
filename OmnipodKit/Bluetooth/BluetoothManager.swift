@@ -87,6 +87,13 @@ protocol OmniConnectionDelegate: AnyObject {
      */
     func omnipodPeripheralDidFailToConnect(peripheral: CBPeripheral, error: Error?)
 
+    /// Write a message to Loop's persistent device log (survives background wakes / relaunch and is
+    /// bundled in the issue report, unlike a live Console stream).
+    func omnipodLogDeviceEvent(_ message: String)
+}
+
+extension OmniConnectionDelegate {
+    func omnipodLogDeviceEvent(_ message: String) {}
 }
 
 
@@ -208,9 +215,10 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? true
     }
 
-    /// Start delay (seconds) for the delayed-connect probe. Starting at 60; goal is ~300 (5 min).
+    /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
+    /// an iOS reacquisition tail (~40s observed), so 300 → wake ~340s.
     static var delayedConnectProbeSeconds: Int {
-        (UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeSeconds") as? Int) ?? 60
+        (UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeSeconds") as? Int) ?? 300
     }
 
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
@@ -254,7 +262,9 @@ class BluetoothManager: NSObject {
         if manager.isScanning { manager.stopScan() }
         delayedProbeInFlight = true
         delayedProbeIssuedAt = Date()
-        log.default("[delayedConnect] issuing connect with StartDelay=%{public}ds for %{public}@", delay, peripheral.identifier.uuidString)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        log.default("[delayedConnect] pid=%{public}d issuing connect with StartDelay=%{public}ds for %{public}@", pid, delay, peripheral.identifier.uuidString)
+        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) issuing connect StartDelay=\(delay)s")
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delay)])
     }
 
@@ -686,8 +696,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // hold so the loop re-arms. Skip the normal session proxy — this is a timing probe only.
         if delayedProbeInFlight {
             let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?"
-            log.default("[delayedConnect] CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
-                        measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
+            let pid = ProcessInfo.processInfo.processIdentifier
+            log.default("[delayedConnect] pid=%{public}d CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
+                        pid, measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) CONNECTED after \(measured)s (StartDelay=\(BluetoothManager.delayedConnectProbeSeconds)s)")
             delayedProbeInFlight = false
             delayedProbeIssuedAt = nil
             managerQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in

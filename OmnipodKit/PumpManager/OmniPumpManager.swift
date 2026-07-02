@@ -363,6 +363,10 @@ public class OmniPumpManager: RileyLinkPumpManager {
         }
     }
 
+    func omnipodLogDeviceEvent(_ message: String) {
+        logDeviceCommunication(message, type: .connection)
+    }
+
     func omnipodPeripheralDidConnect(manager: PeripheralManager) {
         logDeviceCommunication("Pod connected \(manager.peripheral.identifier.uuidString)", type: .connection)
         notifyPodConnectionStateDidChange(isConnected: true)
