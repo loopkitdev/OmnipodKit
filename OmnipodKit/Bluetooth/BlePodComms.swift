@@ -690,7 +690,20 @@ class BlePodComms: PodComms {
 
     func bleRunSession(withName name: String, _ block: @escaping (_ result: SessionRunResult) -> Void) {
 
+        // In connect-on-demand mode the pod is normally disconnected, and self.manager (set only in
+        // omnipodPeripheralDidConnect / on restore) is nil on a fresh launch — nothing has connected
+        // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
+        // so configureAndRun can bootstrap the first on-demand connect. Without this, every command
+        // failed with podNotConnected and the connect could never start.
+        if manager == nil, BluetoothManager.connectOnDemandEnabled, let bleId = podState?.bleIdentifier {
+            self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
+            if self.manager != nil {
+                log.default("[connectOnDemand] adopted PeripheralManager for %{public}@ while disconnected", bleId)
+            }
+        }
+
         guard let manager = manager else {
+            log.default("[connectOnDemand] no PeripheralManager for pod yet (not discovered) — podNotConnected")
             block(.failure(PodCommsError.podNotConnected))
             return
         }

@@ -387,6 +387,17 @@ class BluetoothManager: NSObject {
         return connected
     }
 
+    /// The PeripheralManager for a known device by peripheral UUID — connected OR NOT. Connect-on-demand
+    /// uses this to obtain the pod's manager while disconnected (BlePodComms.manager is otherwise only
+    /// set in omnipodPeripheralDidConnect, so it's nil on a fresh launch when auto-reconnect is off).
+    func peripheralManager(forIdentifier uuidString: String) -> PeripheralManager? {
+        var result: PeripheralManager?
+        managerQueue.sync {
+            result = self.devices.first(where: { $0.manager.peripheral.identifier.uuidString == uuidString })?.manager
+        }
+        return result
+    }
+
     override var debugDescription: String {
         
         var report = [
@@ -494,7 +505,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.default("%{public}@ %{public}@ rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
                         tag, peripheral.identifier.uuidString, RSSI, String(describing: peripheral.state.rawValue),
                         String(describing: connectable), name.isEmpty ? "-" : name, svcUUIDs.isEmpty ? "-" : svcUUIDs, mfg, svcData)
-        } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, BluetoothManager.advertisementMonitorEnabled {
+        } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
+                  BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.beaconCaptureEnabled {
+            // Suppressed in beacon-capture (wildcard) mode — this fired for every nearby BLE device.
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
 
