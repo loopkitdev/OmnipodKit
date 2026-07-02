@@ -192,6 +192,13 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false
     }
 
+    /// Measurement mode (field-test only): skip ALL pod commands so the pod is left idle-disconnected
+    /// and the wildcard scan runs uninterrupted — a clean window to measure the advert cadence and
+    /// see whether a CE1F923D beacon ever appears, without connect churn stopping the scan.
+    static var suppressCommandsEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.suppressCommandsEnabled") as? Bool ?? true
+    }
+
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
     /// - `C005`: CONFIRMED 16-bit alarm 2nd-UUID on this pod (expiration reminder). Extend as more
     ///   alert/alarm types are captured.
