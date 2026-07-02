@@ -1814,6 +1814,39 @@ extension OmniPumpManager {
         #endif
     }
 
+    /// DEBUG (field test): program a real, non-fault pod alert to fire ~60s from now, so we can
+    /// capture the pod's alarm/beacon advertisement (§5) non-destructively. Uses the expiration-
+    /// reminder slot with a near-future absAlertTime — the pod beeps and (per the RE spec) should
+    /// flip its advertisement to the AS/beacon state. It's an alert, not a fault: acknowledge it
+    /// away and the pod is fine. NOTE: this overwrites the pod's expiration reminder — reset that in
+    /// settings after testing.
+    func triggerTestAlert() async throws {
+        guard self.hasActivePod else {
+            throw OmniPumpManagerError.noPodPaired
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            self.runSession(withName: "Trigger Test Alert") { (result) in
+                switch result {
+                case .success(let session):
+                    self.handleSilencePodEnd(session: session)
+                    let podTime = self.podTime
+                    let alertPodTime = podTime + TimeInterval(seconds: 60)  // fire ~60s from now (mirrors updateExpirationReminder math)
+                    let testAlert = PodAlert.expirationReminder(offset: podTime, absAlertTime: alertPodTime, silent: false)
+                    do {
+                        let beepBlock = self.beepMessageBlock(beepType: .beep)
+                        let _ = try session.configureAlerts([testAlert], beepBlock: beepBlock)
+                        self.log.default("[testAlert] scheduled expirationReminder to fire in ~60s (podTime=%{public}@, alertPodTime=%{public}@)", podTime.timeIntervalStr, alertPodTime.timeIntervalStr)
+                        continuation.resume()
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     func playTestBeeps() async throws {
         guard self.hasActivePod else {
             throw OmniPumpManagerError.noPodPaired
