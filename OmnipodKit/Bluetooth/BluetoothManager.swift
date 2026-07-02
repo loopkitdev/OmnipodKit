@@ -159,6 +159,18 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.connectOnDemandEnabled") as? Bool ?? true
     }
 
+    /// §5 beacon-capture: scan withServices:nil (foreground, allowDuplicates) so we catch the pod's
+    /// alarm/beacon advertisement even if it advertises a service UUID we don't yet filter on (e.g.
+    /// the CE1F923D-… alarm beacon). Logs full raw fields for any pod-adjacent or CE1F923D frame so a
+    /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
+    /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
+    static var beaconCaptureEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true
+    }
+
+    /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
+    static let beaconUUIDPrefix = "CE1F923D-C539-48EA-7300-0A"
+
     /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
     private var connectRequestedAt: [String: Date] = [:]
 
@@ -345,14 +357,19 @@ class BluetoothManager: NSObject {
         } else {
             serviceUUID = podType.blePodProfile.advertisementServiceUUID
         }
-        // Monitor mode: allowDuplicates so we see the advertisement cadence (foreground only —
+        // Monitor/beacon mode: allowDuplicates so we see the advertisement cadence (foreground only —
         // iOS coalesces duplicates in the background).
-        let options: [String: Any] = BluetoothManager.advertisementMonitorEnabled
+        let options: [String: Any] = (BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled)
             ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
-        log.default("Start scanning for %{public}@ (advertisementMonitor=%{public}@, allowDuplicates=%{public}@)",
-                    serviceUUID.uuidString, String(describing: BluetoothManager.advertisementMonitorEnabled),
+        // §5: scan withServices:nil so we catch a beacon advertising a UUID we don't yet filter on.
+        // Wildcard is foreground-only; the whole point of §5 is to discover the stable filter UUID.
+        let services: [CBUUID]? = BluetoothManager.beaconCaptureEnabled ? nil : [serviceUUID]
+        log.default("Start scanning (filter=%{public}@, advertisementMonitor=%{public}@, beaconCapture=%{public}@, allowDuplicates=%{public}@)",
+                    services == nil ? "nil (wildcard)" : serviceUUID.uuidString,
+                    String(describing: BluetoothManager.advertisementMonitorEnabled),
+                    String(describing: BluetoothManager.beaconCaptureEnabled),
                     String(describing: options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil))
-        manager.scanForPeripherals(withServices: [serviceUUID], options: options)
+        manager.scanForPeripherals(withServices: services, options: options)
     }
 
     private func stopScanning() {
@@ -460,21 +477,24 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.debug("%{public}@: %{public}@, %{public}@", #function, peripheral, advertisementData)
 
-        // Full advertisement dump for pod-identified peripherals — to test the "faults via
-        // advertisement" model: capture every field (esp. the service-UUID list, which changed
-        // between scans early on) + RSSI + connectable + peripheral state, every time.
-        if BluetoothManager.advertisementMonitorEnabled,
-           autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil {
-            let svcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.map { $0.uuidString }.joined(separator: ",") ?? "-"
+        // Full advertisement dump for pod-adjacent frames — the raw material for §5 (normal↔alarm
+        // diff) and the "faults via advertisement" model. Captures every field, every time.
+        let advSvcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let isBeaconFrame = advSvcUUIDs.contains { $0.uuidString.uppercased().hasPrefix(BluetoothManager.beaconUUIDPrefix) }
+        let isPodFrame = autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil
+        if (BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled), isPodFrame || isBeaconFrame {
+            let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
             let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
             let svcData = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?
                 .map { "\($0.key.uuidString):\($0.value.hexadecimalString)" }.joined(separator: ",") ?? "-"
             let connectable = advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber
             let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "-"
-            log.default("[ADV] %{public}@ rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
-                        peripheral.identifier.uuidString, RSSI, String(describing: peripheral.state.rawValue),
-                        String(describing: connectable), name, svcUUIDs, mfg, svcData)
-        } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+            // Tag beacon frames distinctly so the §5 diff is trivial to grep.
+            let tag = isBeaconFrame ? "[BEACON]" : "[ADV]"
+            log.default("%{public}@ %{public}@ rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
+                        tag, peripheral.identifier.uuidString, RSSI, String(describing: peripheral.state.rawValue),
+                        String(describing: connectable), name.isEmpty ? "-" : name, svcUUIDs.isEmpty ? "-" : svcUUIDs, mfg, svcData)
+        } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, BluetoothManager.advertisementMonitorEnabled {
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
 
