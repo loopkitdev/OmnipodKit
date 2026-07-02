@@ -586,6 +586,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        // Connected — stop the connect-helper scan (connectOnDemand started a light scan to speed the
+        // connect). We don't scan while connected; the monitor scan is restored on the next disconnect.
+        if manager.isScanning {
+            manager.stopScan()
+        }
+
         if let requestedAt = connectRequestedAt.removeValue(forKey: peripheral.identifier.uuidString) {
             let latency = String(format: "%.3f", Date().timeIntervalSince(requestedAt))
             log.default("[#%{public}@] CONNECTED: %{public}@ — connect latency %{public}@s (known device: %{public}@)",
