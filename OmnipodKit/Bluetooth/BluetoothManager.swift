@@ -103,7 +103,10 @@ class BluetoothManager: NSObject {
     
     /// Isolated to `managerQueue`
     private var devices: [Omni] = []
-    
+
+    /// Last-seen DASH advertisement status word per peripheral, for connectionless alert detection.
+    private var lastPodStatusWord: [String: Data] = [:]
+
     /// Isolated to `managerQueue`
     private var discoveryModeEnabled: Bool = false
 
@@ -494,6 +497,37 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
     }
 
+    /// The DASH "clear / no alert" status word (see DASH_BEACON_FINDINGS.md). Any other value while
+    /// the pod is otherwise healthy indicates an active alert/alarm.
+    private static let podStatusClear = Data([0x00, 0x02, 0x00, 0x00])
+
+    /// Extract the 4-byte DASH status word from the manufacturer data: it sits immediately before the
+    /// 3-byte address+trailer tail (…000a‹STATUS›f10cbc). End-anchored so it's robust to the fixed
+    /// pod-id prefix. Returns nil if the mfg data isn't the expected DASH shape.
+    private func podStatusWord(from advertisementData: [String: Any]) -> Data? {
+        guard let mfg = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, mfg.count >= 8 else { return nil }
+        return mfg.subdata(in: (mfg.count - 7)..<(mfg.count - 3))
+    }
+
+    /// PROTOTYPE connectionless alert detection (§5 finding): read the pod's alert state straight from
+    /// its advertisement — no connection needed. Logs the status word and flags clear↔alert transitions.
+    /// TODO(stage 2): route a confirmed alert transition to the pump manager (raise/clear a pod alert)
+    /// once the per-alert bit mapping is confirmed across more alert types, to avoid false positives.
+    private func detectPodAlertStatus(peripheral: CBPeripheral, advertisementData: [String: Any]) {
+        guard let status = podStatusWord(from: advertisementData) else { return }
+        let id = peripheral.identifier.uuidString
+        guard lastPodStatusWord[id] != status else { return }   // only on change
+        let wasAlert = lastPodStatusWord[id].map { $0 != BluetoothManager.podStatusClear }
+        let isAlert = status != BluetoothManager.podStatusClear
+        lastPodStatusWord[id] = status
+        log.default("[POD-STATUS] %{public}@ status=%{public}@ (%{public}@) — connectionless detect",
+                    id, status.hexadecimalString, isAlert ? "non-clear/ALERT" : "clear")
+        if wasAlert != isAlert {
+            log.default("[POD-ALERT] %{public}@ → %{public}@ (from advertisement, no connect)",
+                        id, isAlert ? "ALERT ACTIVE" : "CLEARED")
+        }
+    }
+
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
@@ -520,6 +554,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
                   BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.beaconCaptureEnabled {
             // Suppressed in beacon-capture (wildcard) mode — this fired for every nearby BLE device.
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
+        }
+
+        if isPodFrame {
+            detectPodAlertStatus(peripheral: peripheral, advertisementData: advertisementData)
         }
 
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
