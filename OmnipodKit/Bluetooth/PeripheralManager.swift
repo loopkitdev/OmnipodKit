@@ -248,10 +248,12 @@ extension PeripheralManager {
 // MARK: - Synchronous Commands
 extension PeripheralManager {
     /// - Throws: PeripheralManagerError
-    func runCommand(timeout: TimeInterval, command: () -> Void) throws {
+    func runCommand(timeout: TimeInterval, allowDisconnected: Bool = false, command: () -> Void) throws {
         // Prelude
         dispatchPrecondition(condition: .onQueue(queue))
-        guard central?.state == .poweredOn && peripheral.state == .connected else {
+        // allowDisconnected: for connect-on-demand, the command IS the connect — the peripheral is
+        // legitimately disconnected here and becomes connected via the .connect condition.
+        guard central?.state == .poweredOn && (allowDisconnected || peripheral.state == .connected) else {
             self.log.info("runCommand guard failed - bluetooth not running or peripheral not connected: peripheral %@", peripheral)
             self.log.info("runCommand guard failed - not ready: peripheral=%{public}@ centralState=%{public}@ peripheralState=%{public}@ queueDepth=%{public}d commandConditions=%{public}@",
                           peripheral,
@@ -357,7 +359,7 @@ extension PeripheralManager {
         guard peripheral.state != .connected else { return }
         log.default("[connectOnDemand] connecting on demand (state=%{public}d, timeout=%{public}ds)", peripheral.state.rawValue, Int(timeout))
         let start = Date()
-        try runCommand(timeout: timeout) {
+        try runCommand(timeout: timeout, allowDisconnected: true) {
             addCondition(.connect)
             central?.connect(peripheral, options: nil)
         }
