@@ -107,6 +107,10 @@ class BluetoothManager: NSObject {
     /// Last-seen DASH advertisement status word per peripheral, for connectionless alert detection.
     private var lastPodStatusWord: [String: Data] = [:]
 
+    /// Last advertisement timestamp per peripheral, to log inter-frame cadence (the DS-beacon-rate
+    /// measurement the RE asked for — is there a usable periodic wake?).
+    private var lastAdvSeen: [String: Date] = [:]
+
     /// Isolated to `managerQueue`
     private var discoveryModeEnabled: Bool = false
 
@@ -181,13 +185,25 @@ class BluetoothManager: NSObject {
     /// Trade-off: only catches the enumerated alarm UUIDs below (currently just the one confirmed
     /// alert value); the clear transition isn't caught here (confirm on the next connect). See
     /// DASH_BEACON_FINDINGS.md. Add more alarm UUID values as they're discovered.
+    /// NOTE: default flipped to FALSE to run the reconciliation experiment — a clean wildcard idle
+    /// capture to confirm whether this pod EVER emits a 128-bit CE1F923D beacon (RE binary model) or
+    /// only the 16-bit C005 alarm signal we've observed. Re-enable once the true alarm UUID is confirmed.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false
     }
 
-    /// Known DASH alarm-state 16-bit service UUIDs (the 2nd UUID while alerting). `C005` = confirmed
-    /// (expiration reminder); extend as more alert/alarm types are captured.
-    static let alarmServiceUUIDs = [CBUUID(string: "C005")]
+    /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
+    /// - `C005`: CONFIRMED 16-bit alarm 2nd-UUID on this pod (expiration reminder). Extend as more
+    ///   alert/alarm types are captured.
+    /// - The 128-bit AS/AST are the RE binary model `CE1F923D-C539-48EA-7300-0A<deviceId><TT>` with
+    ///   deviceId GUESSED = pod address 179F0CF1 (TT 02=AS, 03=AST). UNCONFIRMED — no CE1F923D frame
+    ///   has appeared in field capture; harmless if wrong (just won't match). Fix deviceId/byte-order
+    ///   from a real [BEACON] capture before relying on these.
+    static let alarmServiceUUIDs: [CBUUID] = [
+        CBUUID(string: "C005"),
+        CBUUID(string: "CE1F923D-C539-48EA-7300-0A179F0CF102"),
+        CBUUID(string: "CE1F923D-C539-48EA-7300-0A179F0CF103"),
+    ]
 
     /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
     private var connectRequestedAt: [String: Date] = [:]
@@ -572,8 +588,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
             let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "-"
             // Tag beacon frames distinctly so the §5 diff is trivial to grep.
             let tag = isBeaconFrame ? "[BEACON]" : "[ADV]"
-            log.default("%{public}@ %{public}@ rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
-                        tag, peripheral.identifier.uuidString, RSSI, String(describing: peripheral.state.rawValue),
+            // Inter-frame delta = the advertising cadence (RE's DS-beacon-rate question).
+            let now = Date()
+            let dt = lastAdvSeen[peripheral.identifier.uuidString].map { String(format: "%.2f", now.timeIntervalSince($0)) } ?? "-"
+            lastAdvSeen[peripheral.identifier.uuidString] = now
+            log.default("%{public}@ %{public}@ dt=%{public}@s rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
+                        tag, peripheral.identifier.uuidString, dt, RSSI, String(describing: peripheral.state.rawValue),
                         String(describing: connectable), name.isEmpty ? "-" : name, svcUUIDs.isEmpty ? "-" : svcUUIDs, mfg, svcData)
         } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
                   BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.beaconCaptureEnabled {
