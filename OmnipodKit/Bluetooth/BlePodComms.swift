@@ -690,7 +690,14 @@ class BlePodComms: PodComms {
 
     func bleRunSession(withName name: String, _ block: @escaping (_ result: SessionRunResult) -> Void) {
 
-        guard let manager = manager, manager.peripheral.state == .connected else {
+        guard let manager = manager else {
+            block(.failure(PodCommsError.podNotConnected))
+            return
+        }
+        // In connect-on-demand mode the pod is normally disconnected; manager.runSession ->
+        // configureAndRun connects on demand before the session block runs. Only require an existing
+        // connection here in the classic "held connected" mode.
+        if !BluetoothManager.connectOnDemandEnabled, manager.peripheral.state != .connected {
             block(.failure(PodCommsError.podNotConnected))
             return
         }
