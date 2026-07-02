@@ -151,6 +151,14 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.advertisementMonitorEnabled") as? Bool ?? true
     }
 
+    /// Field-test flag: "normally disconnected" model. When on, the auto-reconnect machinery is
+    /// suppressed (the pod is NOT held connected); PeripheralManager connects on demand for each
+    /// session and disconnects when idle, and we scan (advertisementMonitor) while disconnected.
+    /// This changes how Loop stays in touch with the pump — every command pays a connect first.
+    static var connectOnDemandEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.connectOnDemandEnabled") as? Bool ?? true
+    }
+
     /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
     private var connectRequestedAt: [String: Date] = [:]
 
@@ -161,6 +169,18 @@ class BluetoothManager: NSObject {
         }
         let cm: CBCentralManager = manager
         cm.connect(peripheral, options: nil)
+    }
+
+    /// The keep-connected auto-reconnect. Suppressed in connect-on-demand mode, where the pod is
+    /// left disconnected between commands (and observable via advertisements) and connected on
+    /// demand by PeripheralManager. Explicit connects (pairing, retrieveAndConnectKnownPod, the
+    /// on-demand connect) do NOT route through here and are unaffected.
+    private func autoReconnect(_ peripheral: CBPeripheral) {
+        if BluetoothManager.connectOnDemandEnabled {
+            log.debug("[connectOnDemand] suppressing auto-reconnect to %{public}@", peripheral.identifier.uuidString)
+            return
+        }
+        timedConnect(peripheral)
     }
 
     init(podType: PodType) {
@@ -240,7 +260,7 @@ class BluetoothManager: NSObject {
             {
                 self.log.default("connectToDevice: retrieved peripheral %{public}@ via retrievePeripherals", uuidString)
                 self.addPeripheral(peripheral, podAdvertisement: nil)
-                self.timedConnect(peripheral)
+                self.autoReconnect(peripheral)
             }
         }
     }
@@ -258,7 +278,7 @@ class BluetoothManager: NSObject {
             }
             let device = addPeripheral(peripheral, podAdvertisement: nil)
             autoConnectIDs.insert(uuidString)
-            timedConnect(peripheral)
+            autoReconnect(peripheral)
             log.default("retrieveAndConnectKnownPod: initiating connection to %{public}@", peripheral)
             result = device
         }
@@ -282,7 +302,7 @@ class BluetoothManager: NSObject {
             if autoConnectIDs.contains(peripheral.identifier.uuidString) {
                 if peripheral.state == .disconnected || peripheral.state == .disconnecting {
                     log.info("updateConnections: Connecting to peripheral: %{public}@", peripheral)
-                    timedConnect(peripheral)
+                    autoReconnect(peripheral)
                 }
             } else {
                 if peripheral.state == .connected || peripheral.state == .connecting {
@@ -309,7 +329,7 @@ class BluetoothManager: NSObject {
             let peripheral = device.manager.peripheral
             if peripheral.state == .disconnected || peripheral.state == .disconnecting {
                 log.info("discoverPods: Connecting to peripheral: %{public}@", peripheral)
-                timedConnect(peripheral)
+                timedConnect(peripheral)  // pairing/discovery — an explicit connect, not auto-reconnect
             }
         }
         startScanning()
@@ -379,7 +399,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 if let newPeripheral = central.retrievePeripherals(withIdentifiers: [device.manager.peripheral.identifier]).first {
                     log.debug("Re-connecting to known peripheral %{public}@", newPeripheral.identifier.uuidString)
                     device.manager.peripheral = newPeripheral
-                    timedConnect(newPeripheral)
+                    autoReconnect(newPeripheral)
                 }
             }
 
@@ -392,7 +412,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 {
                     log.default("[#%{public}@] Recovered peripheral from autoConnectIDs: %{public}@", instanceID, uuidString)
                     addPeripheral(peripheral, podAdvertisement: nil)
-                    timedConnect(peripheral)
+                    autoReconnect(peripheral)
                 }
             }
 
@@ -464,10 +484,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
             if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
                 // Connect to any pairable device, during discovery
                 log.default("Connecting to pairable device %{public} in discovery mode", peripheral)
-                timedConnect(peripheral)
+                timedConnect(peripheral)  // pairing — an explicit connect, not auto-reconnect
             } else if autoConnectIDs.contains(peripheral.identifier.uuidString) && peripheral.state == .disconnected {
                 log.debug("Reonnecting to autoconnect device")
-                timedConnect(peripheral)
+                autoReconnect(peripheral)
             } else {
                 log.info("Ignoring paired or unconnectable peripheral: %{public}@", peripheral)
             }
@@ -519,7 +539,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
             log.debug("Reconnecting disconnected autoconnect peripheral")
-            timedConnect(peripheral)
+            autoReconnect(peripheral)
         }
     }
 
@@ -531,7 +551,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         connectionDelegate?.omnipodPeripheralDidFailToConnect(peripheral: peripheral, error: error)
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
-            timedConnect(peripheral)
+            autoReconnect(peripheral)
         }
     }
 }

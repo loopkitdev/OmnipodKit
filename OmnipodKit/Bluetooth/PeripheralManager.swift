@@ -151,7 +151,18 @@ extension PeripheralManager {
 
     func configureAndRun(_ block: @escaping (_ manager: PeripheralManager) -> Void) -> (() -> Void) {
         return {
-            if self.needsReconnection {
+            if BluetoothManager.connectOnDemandEnabled {
+                // "Normally disconnected" model: the pod isn't held connected, so connect on demand
+                // for this session (no forceful reconnect — that heuristic is what caused the ~28s
+                // disconnect-then-wait stalls). If already connected (burst of sessions), no-op.
+                if self.peripheral.state != .connected {
+                    do {
+                        try self.connectOnDemand(timeout: 20)
+                    } catch let error {
+                        self.log.error("[connectOnDemand] on-demand connect failed: %{public}@", String(describing: error))
+                    }
+                }
+            } else if self.needsReconnection {
                 self.log.default("Triggering forceful reconnect")
                 do {
                     try self.reconnect(timeout: 5)
@@ -337,6 +348,20 @@ extension PeripheralManager {
             addCondition(.connect)
             central?.cancelPeripheralConnection(peripheral)
         }
+    }
+
+    /// Connect-on-demand: issue a real connect() and wait for didConnect. Unlike reconnect(), this
+    /// does NOT cancel first — it connects a peripheral we're deliberately keeping disconnected
+    /// between commands. Logs the measured connect latency (the number that decides viability).
+    func connectOnDemand(timeout: TimeInterval) throws {
+        guard peripheral.state != .connected else { return }
+        log.default("[connectOnDemand] connecting on demand (state=%{public}d, timeout=%{public}ds)", peripheral.state.rawValue, Int(timeout))
+        let start = Date()
+        try runCommand(timeout: timeout) {
+            addCondition(.connect)
+            central?.connect(peripheral, options: nil)
+        }
+        log.default("[connectOnDemand] connected in %{public}@s", String(format: "%.3f", Date().timeIntervalSince(start)))
     }
 
     /// - Throws: PeripheralManagerError
@@ -648,7 +673,25 @@ extension PeripheralManager {
                 manager.log.default("------------------------ %{public}@ ---------------------------", name)
                 self?.idleStart = Date()
                 self?.log.default("Start of idle at %{public}@", String(describing: self?.idleStart))
+                self?.scheduleIdleDisconnectIfNeeded()
             }
         })
+    }
+
+    /// Connect-on-demand: after a session goes idle, if no further session is queued, disconnect
+    /// the pod so it's left "normally disconnected" (and advertising/observable) between commands.
+    /// A short delay batches command bursts (status → bolus → status) into one connection.
+    private func scheduleIdleDisconnectIfNeeded() {
+        guard BluetoothManager.connectOnDemandEnabled else { return }
+        let idleDelay: TimeInterval = 4
+        let idleAt = idleStart
+        queue.asyncAfter(deadline: .now() + idleDelay) { [weak self] in
+            guard let self = self, BluetoothManager.connectOnDemandEnabled else { return }
+            // Only disconnect if we're still idle (no newer session) and nothing is queued/running.
+            guard self.idleStart == idleAt, self.sessionQueue.operationCount == 0,
+                  self.peripheral.state == .connected else { return }
+            self.log.default("[connectOnDemand] idle ~%{public}ds, no queued session -> disconnecting", Int(idleDelay))
+            self.central?.cancelPeripheralConnection(self.peripheral)
+        }
     }
 }
