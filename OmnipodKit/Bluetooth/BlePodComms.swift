@@ -55,6 +55,12 @@ class BlePodComms: PodComms {
         super.forgetPod()
     }
 
+    /// Enable/disable the pump-provided BLE heartbeat (delayed-connect loop). Driven by
+    /// OmniPumpManager.setMustProvideBLEHeartbeat — used only when the CGM can't provide a heartbeat.
+    func setProvidesHeartbeat(_ enabled: Bool) {
+        bluetoothManager?.setProvidesHeartbeat(enabled)
+    }
+
     // Removes references to the bluetoothManager to avoid future
     // "Bluetooth use unsupported on this device" errors on the
     // next BlePodComms instantiation and subsequent usage.

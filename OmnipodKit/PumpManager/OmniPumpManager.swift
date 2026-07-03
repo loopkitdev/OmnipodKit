@@ -319,6 +319,10 @@ public class OmniPumpManager: RileyLinkPumpManager {
             rileyLinkDeviceProvider.timerTickEnabled = self.state.isPumpDataStale || mustProvideBLEHeartbeat
         } else {
             provideHeartbeat = mustProvideBLEHeartbeat
+            // BLE pod: when the host needs us to provide the heartbeat (e.g. a CGM that can't), run
+            // the delayed-connect loop for periodic background wakes; otherwise stay disconnected +
+            // alarm-scan and connect on demand.
+            (podComms as? BlePodComms)?.setProvidesHeartbeat(mustProvideBLEHeartbeat)
         }
     }
 
