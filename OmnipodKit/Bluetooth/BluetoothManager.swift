@@ -752,7 +752,13 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 pendingFreshConnectID = nil
                 log.default("[connectOnDemand] fresh discovery -> connect %{public}@", peripheral.identifier.uuidString)
                 manager.stopScan()
-                manager.connect(peripheral, options: nil)
+                // Defer the connect one managerQueue tick so the scan actually tears down first.
+                // Connecting synchronously here (still inside the scan's didDiscover) starved the
+                // connect -> it wedged in .connecting and timed out at 20s. Let iOS settle the
+                // stopScan, then connect fully dark on the just-heard advert.
+                managerQueue.async { [weak self] in
+                    self?.manager.connect(peripheral, options: nil)
+                }
             }
             // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
             issueDelayedConnectProbe(peripheral)
