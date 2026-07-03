@@ -69,6 +69,9 @@ class PeripheralManager: NSObject {
 
     private(set) weak var central: CBCentralManager?
 
+    /// Owning BluetoothManager, for the fresh-discovery connect-on-demand path (it sees didDiscover).
+    weak var bluetoothManager: BluetoothManager?
+
     let profile: BlePodProfile
     let configuration: Configuration
 
@@ -368,7 +371,13 @@ extension PeripheralManager {
         do {
             try runCommand(timeout: timeout, allowDisconnected: true) {
                 addCondition(.connect)
-                central?.connect(peripheral, options: nil)
+                // Fast path: let BluetoothManager hear the pod first, then connect on the fresh advert
+                // (~1-2s) instead of a cold connect (~16s). Falls back to a direct connect if unavailable.
+                if let bt = bluetoothManager {
+                    bt.connectViaFreshDiscovery(peripheral)
+                } else {
+                    central?.connect(peripheral, options: nil)
+                }
             }
         } catch {
             // Unstick a connect that never completed, so didDisconnect/didFailToConnect fires

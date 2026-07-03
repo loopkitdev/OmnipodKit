@@ -371,7 +371,9 @@ class BluetoothManager: NSObject {
                 device.advertisement = podAdvertisement
             }
         } else {
-            device = Omni(peripheralManager: PeripheralManager(peripheral: peripheral, podType: podType, centralManager: manager), advertisement: podAdvertisement)
+            let pm = PeripheralManager(peripheral: peripheral, podType: podType, centralManager: manager)
+            pm.bluetoothManager = self   // for fresh-discovery connect-on-demand
+            device = Omni(peripheralManager: pm, advertisement: podAdvertisement)
             devices.append(device)
             log.info("Created device")
         }
@@ -495,14 +497,41 @@ class BluetoothManager: NSObject {
         completion(nil)
     }
 
-    private func startScanning() {
-        let serviceUUID: CBUUID
+    /// The service UUID the pod advertises when healthy-disconnected (used to discover it for a fast
+    /// connect). O5 switches to a pdmId-based UUID after pairing.
+    private var podScanServiceUUID: CBUUID {
         if podType.isO5, let pdmId = uuidPdmId {
-            // The O5 service advertisement UUID is now using the pdmId
-            serviceUUID = o5ServiceAdvertisementUUID(pdmId)
-        } else {
-            serviceUUID = podType.blePodProfile.advertisementServiceUUID
+            return o5ServiceAdvertisementUUID(pdmId)
         }
+        return podType.blePodProfile.advertisementServiceUUID
+    }
+
+    /// Peripheral awaiting a fresh-discovery connect: while set, the next matching didDiscover stops
+    /// the scan and connects on that just-heard advertisement (fast) instead of a cold reacquisition.
+    private var pendingFreshConnectID: String?
+
+    /// Connect fast by first hearing the pod: scan for its service, and on the next discovery stop the
+    /// scan and connect on that fresh advertisement (~1-2s) rather than a bare cold connect (~16s).
+    /// Falls back to a direct connect if we don't hear it quickly.
+    func connectViaFreshDiscovery(_ peripheral: CBPeripheral) {
+        managerQueue.async {
+            let id = peripheral.identifier.uuidString
+            self.pendingFreshConnectID = id
+            self.manager.stopScan()
+            self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID], options: nil)
+            self.log.default("[connectOnDemand] fresh-discovery scan for %{public}@", id)
+            self.managerQueue.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+                guard let self = self, self.pendingFreshConnectID == id else { return }
+                self.pendingFreshConnectID = nil
+                self.log.default("[connectOnDemand] no fresh discovery in 4s — direct (cold) connect")
+                self.manager.stopScan()
+                self.manager.connect(peripheral, options: nil)
+            }
+        }
+    }
+
+    private func startScanning() {
+        let serviceUUID: CBUUID = podScanServiceUUID
         let services: [CBUUID]?
         let options: [String: Any]
         if BluetoothManager.lowPowerMonitorEnabled {
@@ -717,6 +746,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if isPodFrame {
             detectPodAlertStatus(peripheral: peripheral, advertisementData: advertisementData)
+            // Fresh-discovery connect: we just heard the pod — stop scanning and connect NOW on this
+            // fresh advertisement (fast) instead of waiting out iOS's cold reacquisition (~16s).
+            if pendingFreshConnectID == peripheral.identifier.uuidString {
+                pendingFreshConnectID = nil
+                log.default("[connectOnDemand] fresh discovery -> connect %{public}@", peripheral.identifier.uuidString)
+                manager.stopScan()
+                manager.connect(peripheral, options: nil)
+            }
             // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
             issueDelayedConnectProbe(peripheral)
         }
