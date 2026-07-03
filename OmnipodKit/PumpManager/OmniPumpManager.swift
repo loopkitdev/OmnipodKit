@@ -315,6 +315,10 @@ public class OmniPumpManager: RileyLinkPumpManager {
     }
 
     public func setMustProvideBLEHeartbeat(_ mustProvideBLEHeartbeat: Bool) {
+        // Log at the call site so we capture exactly what Loop requests and when — provideHeartbeat
+        // isn't persisted, so reading it elsewhere can be stale relative to this call.
+        let pid = ProcessInfo.processInfo.processIdentifier
+        logDeviceCommunication("[heartbeat] pid=\(pid) setMustProvideBLEHeartbeat(\(mustProvideBLEHeartbeat))", type: .connection)
         if self.state.podType.usesRileyLink {
             rileyLinkDeviceProvider.timerTickEnabled = self.state.isPumpDataStale || mustProvideBLEHeartbeat
         } else {
