@@ -358,13 +358,12 @@ extension PeripheralManager {
     func connectOnDemand(timeout: TimeInterval) throws {
         guard peripheral.state != .connected else { return }
         log.default("[connectOnDemand] connecting on demand (state=%{public}d, timeout=%{public}ds)", peripheral.state.rawValue, Int(timeout))
-        // Going fully dark makes iOS fall back to its sparse connection duty cycle (~11-14s to
-        // connect). Instead: drop the heavy allowDuplicates monitor scan, then run a LIGHT scan
-        // (non-allowDuplicates) so iOS actively hears the pod (~1Hz) and completes the connect fast.
-        // It's the allowDuplicates flood — not scanning per se — that starved the connect earlier.
-        // BluetoothManager stops this helper scan on didConnect and restores the monitor on disconnect.
+        // Go fully dark for the connect: ANY concurrent scan (even non-allowDuplicates wildcard)
+        // starves connection completion on iOS — connect-on-demand with a "helper" scan reliably
+        // TIMED OUT at 20s foreground, whereas the delayed-connect experiments (no scan) always
+        // completed. So stop scanning and let iOS complete the connect; the alarm scan resumes on
+        // disconnect. (Latency without a scan is iOS's own reacquisition; measure it, optimize next.)
         central?.stopScan()
-        central?.scanForPeripherals(withServices: nil, options: nil)
         let start = Date()
         do {
             try runCommand(timeout: timeout, allowDisconnected: true) {
