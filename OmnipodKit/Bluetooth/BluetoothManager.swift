@@ -692,10 +692,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
             manager.stopScan()
         }
 
-        // Delayed-connect probe completed: report the measured delay, then disconnect after a brief
-        // hold so the loop re-arms. Skip the normal session proxy — this is a timing probe only.
-        if delayedProbeInFlight {
-            let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?"
+        // Delayed-connect probe (or a restored connect after relaunch): report the delay, then
+        // disconnect after a brief hold so the loop re-arms (didDisconnect issues the next probe).
+        // Fire for ANY connect while the probe is enabled — a restored connect on a fresh process has
+        // delayedProbeInFlight=false but must still re-arm, else the loop stalls after every relaunch.
+        // Skip the normal session proxy — this is a timing probe only. (Safe here because
+        // suppressCommands means there are no legitimate command connects to misclassify.)
+        if BluetoothManager.delayedConnectProbeEnabled {
+            let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?(restored)"
             let pid = ProcessInfo.processInfo.processIdentifier
             log.default("[delayedConnect] pid=%{public}d CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
                         pid, measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
@@ -745,8 +749,15 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.debug("Reconnecting disconnected autoconnect peripheral")
             autoReconnect(peripheral)
         }
-        delayedProbeInFlight = false   // re-arm the probe on the next discovery
-        resumeScanIfNeeded()
+        delayedProbeInFlight = false
+        if BluetoothManager.delayedConnectProbeEnabled {
+            // Re-arm the delayed connect RIGHT HERE (not via a later didDiscover). This leaves a
+            // pending connect that survives app suspension, so the loop self-sustains — relying on
+            // the scan to re-issue stalled whenever iOS suspended the app between cycles.
+            issueDelayedConnectProbe(peripheral)
+        } else {
+            resumeScanIfNeeded()
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -759,7 +770,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
             autoReconnect(peripheral)
         }
-        delayedProbeInFlight = false   // re-arm the probe on the next discovery
-        resumeScanIfNeeded()
+        delayedProbeInFlight = false
+        if BluetoothManager.delayedConnectProbeEnabled {
+            issueDelayedConnectProbe(peripheral)   // re-arm so a failed connect doesn't stall the loop
+        } else {
+            resumeScanIfNeeded()
+        }
     }
 }
