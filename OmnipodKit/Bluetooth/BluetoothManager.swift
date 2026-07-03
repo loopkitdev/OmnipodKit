@@ -376,6 +376,7 @@ class BluetoothManager: NSObject {
         if let device = device {
             log.default("Matched peripheral %{public}@ to existing device: %{public}@", peripheral, String(describing: device))
             device.manager.peripheral = peripheral
+            device.manager.bluetoothManager = self   // ensure the queue-correct central helpers are reachable
             if let podAdvertisement = podAdvertisement {
                 device.advertisement = podAdvertisement
             }
@@ -553,6 +554,32 @@ class BluetoothManager: NSObject {
             device.manager.peripheral = target
         }
         manager.connect(target, options: nil)
+    }
+
+    // MARK: - Central calls (MUST run on managerQueue)
+    //
+    // CBCentralManager was created with `managerQueue`, so every call into it has to be serialized on
+    // that same queue — otherwise connect/cancel race the delegate callbacks and CoreBluetooth's
+    // internal state machine. Connect-on-demand was calling central.connect()/cancelPeripheralConnection()
+    // from PeripheralManager.queue, which wedged reconnects in .connecting (intermittently). These
+    // helpers give PeripheralManager a queue-correct way to drive the central.
+
+    /// Connect the (known/recovered) peripheral on the central's queue.
+    func connectOnDemand(_ peripheral: CBPeripheral) {
+        managerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.log.default("[connectOnDemand] central.connect on managerQueue for %{public}@", peripheral.identifier.uuidString)
+            self.manager.connect(peripheral, options: nil)
+        }
+    }
+
+    /// Cancel/disconnect the peripheral on the central's queue.
+    func disconnectOnDemand(_ peripheral: CBPeripheral) {
+        managerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.log.default("[connectOnDemand] central.cancel on managerQueue for %{public}@", peripheral.identifier.uuidString)
+            self.manager.cancelPeripheralConnection(peripheral)
+        }
     }
 
     private func startScanning() {

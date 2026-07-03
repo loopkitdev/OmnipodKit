@@ -366,20 +366,20 @@ extension PeripheralManager {
         // TIMED OUT at 20s foreground, whereas the delayed-connect experiments (no scan) always
         // completed. So stop scanning and let iOS complete the connect; the alarm scan resumes on
         // disconnect. (Latency without a scan is iOS's own reacquisition; measure it, optimize next.)
-        central?.stopScan()
         let start = Date()
         do {
             try runCommand(timeout: timeout, allowDisconnected: true) {
                 addCondition(.connect)
                 // Scan-free connect: the peripheral is a known/recovered CBPeripheral (via
                 // retrievePeripherals), so a plain connect() registers a pending connect and iOS
-                // reacquires the pod on its own — no scan needed. Measuring this latency directly.
-                central?.connect(peripheral, options: nil)
+                // reacquires the pod on its own — no scan needed. Route through BluetoothManager so
+                // the central call runs on managerQueue (see connectOnDemand helper).
+                bluetoothManager?.connectOnDemand(peripheral)
             }
         } catch {
             // Unstick a connect that never completed, so didDisconnect/didFailToConnect fires
-            // (which resumes the scan) instead of leaving it wedged in .connecting.
-            central?.cancelPeripheralConnection(peripheral)
+            // instead of leaving it wedged in .connecting. Queue-correct cancel via BluetoothManager.
+            bluetoothManager?.disconnectOnDemand(peripheral)
             throw error
         }
         log.default("[connectOnDemand] connected in %{public}@s", String(format: "%.3f", Date().timeIntervalSince(start)))
@@ -712,7 +712,9 @@ extension PeripheralManager {
             guard self.idleStart == idleAt, self.sessionQueue.operationCount == 0,
                   self.peripheral.state == .connected else { return }
             self.log.default("[connectOnDemand] idle ~%{public}ds, no queued session -> disconnecting", Int(idleDelay))
-            self.central?.cancelPeripheralConnection(self.peripheral)
+            // Queue-correct cancel: route through BluetoothManager so it runs on managerQueue. Cancelling
+            // from this (PeripheralManager) queue raced CoreBluetooth's teardown and wedged the next connect.
+            self.bluetoothManager?.disconnectOnDemand(self.peripheral)
         }
     }
 }
