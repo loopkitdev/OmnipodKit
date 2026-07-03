@@ -68,3 +68,48 @@ Connectionless **alert detection is achievable now**: in the scan callback, read
 service UUID and/or the mfg `STATUS` word and raise an alert to the pump manager when it deviates
 from the clear baseline (`C001` / `00020000`) — no connection required. Detail/acknowledge still
 needs a (slow, ~11–14 s) on-demand connect, but detection itself is instant.
+
+---
+
+# Background wake & heartbeat: delayed connect + State Restoration
+
+Correction to the RE conclusion "BLE gives you alarm-wake but no periodic wake." A **periodic
+background wake IS achievable** — not via scanning (the pod's disconnected advert is stable, so iOS
+coalesces it), but via the **connect** path.
+
+## Mechanism
+Issue `central.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: N])` while
+disconnected. iOS holds the request pending for `N` seconds, then completes it (the pod advertises
+~0.77 s, so it connects shortly after the delay). With State Preservation & Restoration (restore ID
+`com.OmnipodKit`) the pending connect **survives app termination** and **relaunches** the app when
+it completes. Loop: on each `didDisconnect`, immediately re-issue the delayed connect, so there is
+always a pending connect that survives suspension — the loop self-sustains.
+
+## Verified on real hardware (15 h continuous run, DD5D6B83, StartDelay=300 s)
+- **iOS relaunches the terminated app in the background — proven.** Tagged each connect with
+  `everFg` (true once the process has ever been foregrounded). Multiple **new PIDs ran with
+  `everFg=false` for extended periods** — e.g. one process launched via `willRestoreState` and ran
+  the loop **~1h42m / ~13 cycles without ever being foregrounded.** A brand-new process running
+  that long unforegrounded can only be iOS launching it (not a manual open — which is what
+  `willRestoreState` + a new PID alone would NOT prove).
+- **Self-sustaining.** After moving the re-arm into `didDisconnect` (see below), the loop ran ~14 h
+  with no stalls across suspend / jetsam / relaunch.
+- **Timing is fuzzy, not a clock.** For StartDelay=300 s: floor ~300 s, typical ~350–550 s,
+  frequently 600–800 s, occasional spikes to ~1100–1580 s (~26 min) under heavy iOS throttling.
+  Good for a "phone-home every several minutes" heartbeat; not for anything time-critical.
+
+## Gotchas learned
+- **Re-arm in `didDisconnect`, not via `didDiscover`.** Re-arming through a later scan discovery
+  stalled (observed ~1h43m dead zone) whenever iOS suspended the app between cycles — the re-arm
+  never ran and no pending connect was left to wake on. Issuing the next delayed connect directly
+  in `didDisconnect` leaves a pending connect that survives suspension.
+- **`willRestoreState` fires on a manual open too** — it does not, by itself, prove an iOS
+  relaunch. Use the `everFg`/foreground signal to distinguish.
+- **Force-quit (swipe-away) disables BLE relaunch** by design — not a valid relaunch test.
+- Stop the `allowDuplicates` scan before the connect (it starves connection completion); iOS
+  reacquires the pod on its own.
+
+## Intended use
+Keep this **off by default.** Use the delayed-connect heartbeat only when the hosting app requests
+periodic check-ins. Otherwise: stay **disconnected**, run an **alarm-filtered scan** (`[C005]`) for
+instant fault wake, and **connect on demand** only to send commands / read status.

@@ -180,7 +180,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
@@ -193,18 +193,18 @@ class BluetoothManager: NSObject {
     /// Trade-off: only catches the enumerated alarm UUIDs below (currently just the one confirmed
     /// alert value); the clear transition isn't caught here (confirm on the next connect). See
     /// DASH_BEACON_FINDINGS.md. Add more alarm UUID values as they're discovered.
-    /// NOTE: default flipped to FALSE to run the reconciliation experiment — a clean wildcard idle
-    /// capture to confirm whether this pod EVER emits a 128-bit CE1F923D beacon (RE binary model) or
-    /// only the 16-bit C005 alarm signal we've observed. Re-enable once the true alarm UUID is confirmed.
+    /// Default ON for connect-on-demand mode: while idle, subscribe only for alarm adverts (`[C005]`),
+    /// so we get a background fault wake but don't wake on every normal advert. Connect-on-demand
+    /// (its own light helper scan) handles command connects.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
     /// Measurement mode (field-test only): skip ALL pod commands so the pod is left idle-disconnected
     /// and the wildcard scan runs uninterrupted — a clean window to measure the advert cadence and
     /// see whether a CE1F923D beacon ever appears, without connect churn stopping the scan.
     static var suppressCommandsEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.suppressCommandsEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.suppressCommandsEnabled") as? Bool ?? false
     }
 
     /// Experiment: after each disconnect, issue a connect with CBConnectPeripheralOptionStartDelayKey
@@ -213,7 +213,7 @@ class BluetoothManager: NSObject {
     /// timed background WAKE — the periodic wake the scan path can't (stable payload coalesces). Loop:
     /// discover -> delayed-connect(N) -> didConnect (measure) -> brief hold -> disconnect -> repeat.
     static var delayedConnectProbeEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? false
     }
 
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
