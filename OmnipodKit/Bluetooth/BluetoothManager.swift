@@ -11,6 +11,7 @@ import CoreBluetooth
 import Foundation
 import LoopKit
 import os.log
+import UIKit
 
 enum BluetoothManagerError: Error {
     case bluetoothNotAvailable(CBManagerState)
@@ -242,6 +243,12 @@ class BluetoothManager: NSObject {
     private var delayedProbeInFlight = false
     private var delayedProbeIssuedAt: Date?
 
+    /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
+    /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
+    /// did NOT initiate (a manual open would have foregrounded it). Set on the main queue via a
+    /// lifecycle observer; read from managerQueue for logging (benign race for a bool).
+    private var everForeground = false
+
     /// Stamp the connect time and issue the connect, so didConnect can report the latency.
     private func timedConnect(_ peripheral: CBPeripheral) {
         if connectRequestedAt[peripheral.identifier.uuidString] == nil {
@@ -263,8 +270,8 @@ class BluetoothManager: NSObject {
         delayedProbeInFlight = true
         delayedProbeIssuedAt = Date()
         let pid = ProcessInfo.processInfo.processIdentifier
-        log.default("[delayedConnect] pid=%{public}d issuing connect with StartDelay=%{public}ds for %{public}@", pid, delay, peripheral.identifier.uuidString)
-        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) issuing connect StartDelay=\(delay)s")
+        log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delay, peripheral.identifier.uuidString)
+        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delay)s")
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delay)])
     }
 
@@ -290,6 +297,22 @@ class BluetoothManager: NSObject {
 
         managerQueue.sync {
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])
+        }
+
+        // Track foreground/background so we can tell an iOS background wake/relaunch (everFg stays
+        // false) from a user-initiated open (foregrounds → everFg true). Log the transitions to the
+        // persistent device log with PID for the timeline.
+        let center = NotificationCenter.default
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.everForeground = true
+            let pid = ProcessInfo.processInfo.processIdentifier
+            self?.log.default("[lifecycle] pid=%{public}d APP FOREGROUND", pid)
+            self?.connectionDelegate?.omnipodLogDeviceEvent("[lifecycle] pid=\(pid) APP FOREGROUND")
+        }
+        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            let pid = ProcessInfo.processInfo.processIdentifier
+            self?.log.default("[lifecycle] pid=%{public}d APP BACKGROUND", pid)
+            self?.connectionDelegate?.omnipodLogDeviceEvent("[lifecycle] pid=\(pid) APP BACKGROUND")
         }
     }
 
@@ -701,9 +724,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if BluetoothManager.delayedConnectProbeEnabled {
             let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?(restored)"
             let pid = ProcessInfo.processInfo.processIdentifier
-            log.default("[delayedConnect] pid=%{public}d CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
-                        pid, measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
-            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) CONNECTED after \(measured)s (StartDelay=\(BluetoothManager.delayedConnectProbeSeconds)s)")
+            log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
+                        pid, String(everForeground), measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) CONNECTED after \(measured)s (StartDelay=\(BluetoothManager.delayedConnectProbeSeconds)s)")
             delayedProbeInFlight = false
             delayedProbeIssuedAt = nil
             managerQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
