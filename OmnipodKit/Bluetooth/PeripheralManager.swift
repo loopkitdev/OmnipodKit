@@ -371,13 +371,10 @@ extension PeripheralManager {
         do {
             try runCommand(timeout: timeout, allowDisconnected: true) {
                 addCondition(.connect)
-                // Fast path: let BluetoothManager hear the pod first, then connect on the fresh advert
-                // (~1-2s) instead of a cold connect (~16s). Falls back to a direct connect if unavailable.
-                if let bt = bluetoothManager {
-                    bt.connectViaFreshDiscovery(peripheral)
-                } else {
-                    central?.connect(peripheral, options: nil)
-                }
+                // Scan-free connect: the peripheral is a known/recovered CBPeripheral (via
+                // retrievePeripherals), so a plain connect() registers a pending connect and iOS
+                // reacquires the pod on its own — no scan needed. Measuring this latency directly.
+                central?.connect(peripheral, options: nil)
             }
         } catch {
             // Unstick a connect that never completed, so didDisconnect/didFailToConnect fires

@@ -200,6 +200,15 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
+    /// Field-test master switch: when OFF, ALL scanning is disabled (idle/alarm/monitor/beacon AND
+    /// the connect-on-demand fresh-discovery helper). Connect-on-demand then issues a plain connect()
+    /// on the recovered peripheral and lets iOS reacquire it — no scan involved. Set to measure a
+    /// pure, scan-free connect latency. (The connectionless [ADV]/[POD-ALERT] detection is a scan
+    /// feature, so it's inert while this is off.)
+    static var scanningEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? false
+    }
+
     /// Measurement mode (field-test only): skip ALL pod commands so the pod is left idle-disconnected
     /// and the wildcard scan runs uninterrupted — a clean window to measure the advert cadence and
     /// see whether a CE1F923D beacon ever appears, without connect churn stopping the scan.
@@ -547,6 +556,10 @@ class BluetoothManager: NSObject {
     }
 
     private func startScanning() {
+        guard BluetoothManager.scanningEnabled else {
+            log.default("[connectOnDemand] scanning disabled — not starting a scan (scan-free connect mode)")
+            return
+        }
         let serviceUUID: CBUUID = podScanServiceUUID
         let services: [CBUUID]?
         let options: [String: Any]
