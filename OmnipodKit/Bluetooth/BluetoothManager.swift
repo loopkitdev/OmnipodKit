@@ -525,9 +525,25 @@ class BluetoothManager: NSObject {
                 self.pendingFreshConnectID = nil
                 self.log.default("[connectOnDemand] no fresh discovery in 4s — direct (cold) connect")
                 self.manager.stopScan()
-                self.manager.connect(peripheral, options: nil)
+                self.freshConnect(peripheral)
             }
         }
+    }
+
+    /// Issue an on-demand connect with a stale-state flush. The first connect on a peripheral is
+    /// clean, but a cached CBPeripheral that was previously connected then cancelPeripheralConnection'd
+    /// wedges in .connecting on a bare reconnect (measured: every reconnect after an idle-disconnect
+    /// timed out at 20s while iOS reported it .disconnected + advertising connectable). Cancel any
+    /// lingering iOS-side connection intent and re-fetch the peripheral before connecting.
+    private func freshConnect(_ peripheral: CBPeripheral) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        manager.cancelPeripheralConnection(peripheral)
+        let target = manager.retrievePeripherals(withIdentifiers: [peripheral.identifier]).first ?? peripheral
+        // Keep the session's peripheral reference in sync with the object we actually connect.
+        if let device = devices.first(where: { $0.manager.peripheral.identifier == peripheral.identifier }) {
+            device.manager.peripheral = target
+        }
+        manager.connect(target, options: nil)
     }
 
     private func startScanning() {
@@ -757,7 +773,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 // connect -> it wedged in .connecting and timed out at 20s. Let iOS settle the
                 // stopScan, then connect fully dark on the just-heard advert.
                 managerQueue.async { [weak self] in
-                    self?.manager.connect(peripheral, options: nil)
+                    self?.freshConnect(peripheral)
                 }
             }
             // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
