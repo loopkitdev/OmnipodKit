@@ -91,10 +91,15 @@ protocol OmniConnectionDelegate: AnyObject {
     /// Write a message to Loop's persistent device log (survives background wakes / relaunch and is
     /// bundled in the issue report, unlike a live Console stream).
     func omnipodLogDeviceEvent(_ message: String)
+
+    /// Tells the delegate a pump-provided heartbeat wake fired (a delayed-connect probe completed).
+    /// The host (OmniPumpManager) turns this into pumpManagerBLEHeartbeatDidFire so Loop runs a cycle.
+    func omnipodHeartbeatDidFire()
 }
 
 extension OmniConnectionDelegate {
     func omnipodLogDeviceEvent(_ message: String) {}
+    func omnipodHeartbeatDidFire() {}
 }
 
 
@@ -252,6 +257,17 @@ class BluetoothManager: NSObject {
     private var delayedProbeInFlight = false
     private var delayedProbeIssuedAt: Date?
 
+    /// True while a real command's connect owns the link (connect-on-demand). The heartbeat probe and
+    /// a command connect must never be outstanding together — a command preempts the probe and, while
+    /// it's active, the probe is neither armed nor allowed to claim a didConnect. Cleared on the
+    /// idle-disconnect (going idle) so the probe re-arms. managerQueue-isolated.
+    private var commandConnectInFlight = false
+
+    /// Set when a delayed-connect probe completes (a heartbeat wake): we disconnect the wake link and
+    /// fire the heartbeat from the resulting didDisconnect, so Loop's commands start from a clean
+    /// disconnected state via connect-on-demand. managerQueue-isolated.
+    private var pendingHeartbeatFire = false
+
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
     /// did NOT initiate (a manual open would have foregrounded it). Set on the main queue via a
@@ -308,7 +324,7 @@ class BluetoothManager: NSObject {
     /// Issue a connect with CBConnectPeripheralOptionStartDelayKey and record the time, for the
     /// timed-wake experiment. iOS holds the request for `delayedConnectProbeSeconds`, then connects.
     private func issueDelayedConnectProbe(_ peripheral: CBPeripheral) {
-        guard delayedConnectProbeActive, !delayedProbeInFlight,
+        guard delayedConnectProbeActive, !delayedProbeInFlight, !commandConnectInFlight,
               peripheral.state == .disconnected else { return }
         let delay = BluetoothManager.delayedConnectProbeSeconds
         // Stop the allowDuplicates scan so it doesn't starve the post-delay connect (iOS reacquires the
@@ -564,19 +580,32 @@ class BluetoothManager: NSObject {
     // from PeripheralManager.queue, which wedged reconnects in .connecting (intermittently). These
     // helpers give PeripheralManager a queue-correct way to drive the central.
 
-    /// Connect the (known/recovered) peripheral on the central's queue.
+    /// Connect the (known/recovered) peripheral on the central's queue for a real command. A command
+    /// preempts the heartbeat probe: cancel any in-flight StartDelay probe first so its pending connect
+    /// can't complete and get mis-attributed as this command connect, then mark the command in flight
+    /// (so the probe won't re-arm or claim the didConnect) and connect.
     func connectOnDemand(_ peripheral: CBPeripheral) {
         managerQueue.async { [weak self] in
             guard let self = self else { return }
+            if self.delayedProbeInFlight {
+                self.log.default("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
+                self.delayedProbeInFlight = false
+                self.delayedProbeIssuedAt = nil
+                self.manager.cancelPeripheralConnection(peripheral)
+            }
+            self.commandConnectInFlight = true
             self.log.default("[connectOnDemand] central.connect on managerQueue for %{public}@", peripheral.identifier.uuidString)
             self.manager.connect(peripheral, options: nil)
         }
     }
 
-    /// Cancel/disconnect the peripheral on the central's queue.
+    /// Cancel/disconnect the peripheral on the central's queue. This is the idle-disconnect / teardown
+    /// path, so we're going idle: clear commandConnectInFlight so the resulting didDisconnect re-arms
+    /// the heartbeat probe.
     func disconnectOnDemand(_ peripheral: CBPeripheral) {
         managerQueue.async { [weak self] in
             guard let self = self else { return }
+            self.commandConnectInFlight = false
             self.log.default("[connectOnDemand] central.cancel on managerQueue for %{public}@", peripheral.identifier.uuidString)
             self.manager.cancelPeripheralConnection(peripheral)
         }
@@ -859,18 +888,24 @@ extension BluetoothManager: CBCentralManagerDelegate {
         //    (incl. a restored one after relaunch) is a probe and must re-arm.
         // In normal (command) mode we must NOT hijack a real command connect, so only genuine
         // in-flight probes qualify.
-        let treatAsProbe = delayedProbeInFlight || (delayedConnectProbeActive && BluetoothManager.suppressCommandsEnabled)
+        // A genuine heartbeat-probe wake: the StartDelay connect WE issued completed, and no command
+        // is using the link. (A command connect sets commandConnectInFlight and clears delayedProbeInFlight,
+        // so it never lands here — that was the old hijack that cancelled real commands after 2s.)
+        let treatAsProbe = (delayedProbeInFlight && !commandConnectInFlight)
+                        || (delayedConnectProbeActive && BluetoothManager.suppressCommandsEnabled)
         if treatAsProbe {
             let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?(restored)"
             let pid = ProcessInfo.processInfo.processIdentifier
-            log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@",
+            log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@ — heartbeat wake",
                         pid, String(everForeground), measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
-            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) CONNECTED after \(measured)s (StartDelay=\(BluetoothManager.delayedConnectProbeSeconds)s)")
+            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) CONNECTED after \(measured)s (StartDelay=\(BluetoothManager.delayedConnectProbeSeconds)s) — heartbeat wake")
             delayedProbeInFlight = false
             delayedProbeIssuedAt = nil
-            managerQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.manager.cancelPeripheralConnection(peripheral)
-            }
+            // Drop the wake connection and fire the heartbeat from didDisconnect (clean idle state), so
+            // Loop's resulting status/dose commands run via connect-on-demand rather than fighting this
+            // transient probe link.
+            pendingHeartbeatFire = true
+            manager.cancelPeripheralConnection(peripheral)
             return
         }
 
@@ -912,13 +947,20 @@ extension BluetoothManager: CBCentralManagerDelegate {
             autoReconnect(peripheral)
         }
         delayedProbeInFlight = false
-        if delayedConnectProbeActive {
-            // Re-arm the delayed connect RIGHT HERE (not via a later didDiscover). This leaves a
-            // pending connect that survives app suspension, so the loop self-sustains — relying on
-            // the scan to re-issue stalled whenever iOS suspended the app between cycles.
+        // Re-arm the heartbeat probe only when idle — never while a command owns the link (that
+        // overlap was the source of the connect/disconnect thrash). The re-arm leaves a pending
+        // StartDelay connect that survives app suspension, so the loop self-sustains.
+        if delayedConnectProbeActive && !commandConnectInFlight {
             issueDelayedConnectProbe(peripheral)
         } else {
             resumeScanIfNeeded()
+        }
+        // If this disconnect ended a heartbeat-probe wake, fire the heartbeat now (clean idle state) so
+        // Loop runs its cycle; its commands then preempt the just-armed probe via connect-on-demand.
+        if pendingHeartbeatFire {
+            pendingHeartbeatFire = false
+            log.default("[delayedConnect] firing heartbeat (pumpManagerBLEHeartbeatDidFire)")
+            connectionDelegate?.omnipodHeartbeatDidFire()
         }
     }
 
@@ -933,7 +975,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             autoReconnect(peripheral)
         }
         delayedProbeInFlight = false
-        if delayedConnectProbeActive {
+        if delayedConnectProbeActive && !commandConnectInFlight {
             issueDelayedConnectProbe(peripheral)   // re-arm so a failed connect doesn't stall the loop
         } else {
             resumeScanIfNeeded()

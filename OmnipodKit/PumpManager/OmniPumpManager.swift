@@ -375,6 +375,12 @@ public class OmniPumpManager: RileyLinkPumpManager {
         logDeviceCommunication(message, type: .connection)
     }
 
+    func omnipodHeartbeatDidFire() {
+        // A pump-provided heartbeat wake (delayed-connect probe) completed — run a Loop cycle. Loop's
+        // resulting status/dose commands connect on demand (which preempts the re-armed probe).
+        issueHeartbeatIfNeeded()
+    }
+
     func omnipodPeripheralDidConnect(manager: PeripheralManager) {
         logDeviceCommunication("Pod connected \(manager.peripheral.identifier.uuidString)", type: .connection)
         notifyPodConnectionStateDidChange(isConnected: true)
