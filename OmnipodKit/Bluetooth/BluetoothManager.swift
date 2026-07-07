@@ -519,6 +519,20 @@ class BluetoothManager: NSObject {
     func disconnectFromDevice(uuidString: String) {
         managerQueue.async {
             self.autoConnectIDs.remove(uuidString)
+            // Prune the discarded pod from devices[] (otherwise append-only) and drop any connection, so
+            // a stale device can't be picked up later by the heartbeat/keep-alive machinery or churned
+            // while pairing a new pod. (devices[] never being pruned is long-standing; this closes it.)
+            if let idx = self.devices.firstIndex(where: { $0.manager.peripheral.identifier.uuidString == uuidString }) {
+                let peripheral = self.devices[idx].manager.peripheral
+                if peripheral.state == .connected || peripheral.state == .connecting {
+                    self.manager.cancelPeripheralConnection(peripheral)
+                }
+                self.devices.remove(at: idx)
+                self.log.default("Removed discarded pod %{public}@ from devices", uuidString)
+                self.connectionDelegate?.omnipodLogDeviceEvent("[pairing] removed discarded pod \(uuidString) from devices")
+            }
+            // Quiet any heartbeat probe that was driving off the (now-discarded) pod.
+            self.delayedProbeInFlight = false
         }
     }
     
