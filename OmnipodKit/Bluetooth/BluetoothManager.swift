@@ -861,7 +861,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
         let alertByte: UInt8 = bytes.count >= 4 ? bytes[3] : 0
         let statusByte1: UInt8 = bytes.count >= 2 ? bytes[1] : 0
         let alertSet = AlertSet(rawValue: alertByte)
-        let wasAlert = lastPodStatusWord[id].map { $0 != BluetoothManager.podStatusClear }
+        // Alert state is the b3 AlertSet bitmask (which slots are FIRING). b1 carries a separate
+        // "alert configured" bit (0x08) + baseline 0x02, so the resting advert can be …0a00 with
+        // nothing firing — comparing the whole word against a fixed "clear" mis-flags that. Track the
+        // previous FIRING byte so transitions are computed on the same basis as isAlert.
+        let prevAlertByte = lastPodStatusWord[id].flatMap { d -> UInt8? in
+            let b = Array(d); return b.count >= 4 ? b[3] : nil
+        } ?? 0
+        let wasAlert = prevAlertByte != 0
         let isAlert = alertByte != 0
         lastPodStatusWord[id] = status
         let slotDesc = alertSet.isEmpty ? "none" : alertSet.map { String(describing: $0) }.joined(separator: ",")
