@@ -268,6 +268,13 @@ class BluetoothManager: NSObject {
     /// disconnected state via connect-on-demand. managerQueue-isolated.
     private var pendingHeartbeatFire = false
 
+    /// True while the app is foregrounded. While foreground we keep the pod connected (skip the
+    /// idle-disconnect, reconnect on an unintended drop) so connection-gated UI (test beeps, etc.) is
+    /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
+    private var isAppForeground = false
+    /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
+    var appIsForeground: Bool { isAppForeground }
+
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
     /// did NOT initiate (a manual open would have foregrounded it). Set on the main queue via a
@@ -367,15 +374,23 @@ class BluetoothManager: NSObject {
         // persistent device log with PID for the timeline.
         let center = NotificationCenter.default
         center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.everForeground = true
             let pid = ProcessInfo.processInfo.processIdentifier
-            self?.log.default("[lifecycle] pid=%{public}d APP FOREGROUND", pid)
-            self?.connectionDelegate?.omnipodLogDeviceEvent("[lifecycle] pid=\(pid) APP FOREGROUND")
+            self?.managerQueue.async {
+                guard let self = self else { return }
+                self.everForeground = true
+                self.log.default("[lifecycle] pid=%{public}d APP FOREGROUND", pid)
+                self.connectionDelegate?.omnipodLogDeviceEvent("[lifecycle] pid=\(pid) APP FOREGROUND")
+                self.enterForeground()
+            }
         }
         center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             let pid = ProcessInfo.processInfo.processIdentifier
-            self?.log.default("[lifecycle] pid=%{public}d APP BACKGROUND", pid)
-            self?.connectionDelegate?.omnipodLogDeviceEvent("[lifecycle] pid=\(pid) APP BACKGROUND")
+            self?.managerQueue.async {
+                guard let self = self else { return }
+                self.log.default("[lifecycle] pid=%{public}d APP BACKGROUND", pid)
+                self.connectionDelegate?.omnipodLogDeviceEvent("[lifecycle] pid=\(pid) APP BACKGROUND")
+                self.enterBackground()
+            }
         }
     }
 
@@ -588,22 +603,61 @@ class BluetoothManager: NSObject {
     /// (so the probe won't re-arm or claim the didConnect) and connect.
     func connectOnDemand(_ peripheral: CBPeripheral) {
         managerQueue.async { [weak self] in
-            guard let self = self else { return }
-            if self.delayedProbeInFlight {
-                self.log.default("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
-                self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
-                self.delayedProbeInFlight = false
-                self.delayedProbeIssuedAt = nil
-                self.manager.cancelPeripheralConnection(peripheral)
-            }
-            self.commandConnectInFlight = true
-            // Fresh-discovery connect: briefly scan for the pod and connect on its just-heard advert
-            // (~1-2s) instead of a bare cold connect() that waits out iOS's duty-cycled reacquisition
-            // (~10-16s — the slow user-initiated Suspend). Falls back to a cold connect after 4s if the
-            // pod isn't heard. (The heartbeat probe still uses StartDelay; the two stay serialized via
-            // commandConnectInFlight.)
-            self.log.default("[connectOnDemand] fresh-discovery command connect for %{public}@", peripheral.identifier.uuidString)
-            self.connectViaFreshDiscovery(peripheral)
+            self?.beginCommandConnect(peripheral)
+        }
+    }
+
+    /// Start a command (or keep-alive) connect. Must run on managerQueue.
+    private func beginCommandConnect(_ peripheral: CBPeripheral) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        if delayedProbeInFlight {
+            log.default("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
+            delayedProbeInFlight = false
+            delayedProbeIssuedAt = nil
+            manager.cancelPeripheralConnection(peripheral)
+        }
+        commandConnectInFlight = true
+        // Fresh-discovery connect: briefly scan for the pod and connect on its just-heard advert
+        // (~1-2s) instead of a bare cold connect() that waits out iOS's duty-cycled reacquisition
+        // (~10-16s — the slow user-initiated Suspend). Falls back to a cold connect after 4s if the
+        // pod isn't heard. (The heartbeat probe still uses StartDelay; the two stay serialized via
+        // commandConnectInFlight.)
+        log.default("[connectOnDemand] fresh-discovery command connect for %{public}@", peripheral.identifier.uuidString)
+        connectViaFreshDiscovery(peripheral)
+    }
+
+    /// The known/autoconnect pod peripheral, for foreground keep-alive and heartbeat.
+    private var keepAlivePeripheral: CBPeripheral? {
+        let device = devices.first(where: { autoConnectIDs.contains($0.manager.peripheral.identifier.uuidString) }) ?? devices.first
+        return device?.manager.peripheral
+    }
+
+    /// App entered the foreground: keep the pod connected so connection-gated UI is live and commands
+    /// are instant. Pre-connect if it's currently disconnected. (Idle-disconnect is skipped while
+    /// foreground; a drop is reconnected in didDisconnect.)
+    private func enterForeground() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        isAppForeground = true
+        if let peripheral = keepAlivePeripheral, peripheral.state == .disconnected {
+            log.default("[connectOnDemand] foreground — pre-connecting for keep-alive")
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] foreground — pre-connecting for keep-alive")
+            beginCommandConnect(peripheral)
+        }
+    }
+
+    /// App entered the background: drop the kept-alive connection and resume the ~5-min heartbeat probe.
+    private func enterBackground() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        isAppForeground = false
+        guard let peripheral = keepAlivePeripheral else { return }
+        commandConnectInFlight = false   // deliberate disconnect: let the probe re-arm
+        if peripheral.state == .connected || peripheral.state == .connecting {
+            log.default("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
+            manager.cancelPeripheralConnection(peripheral)   // didDisconnect arms the probe
+        } else {
+            issueDelayedConnectProbe(peripheral)             // already disconnected — arm directly
         }
     }
 
@@ -958,10 +1012,16 @@ extension BluetoothManager: CBCentralManagerDelegate {
             autoReconnect(peripheral)
         }
         delayedProbeInFlight = false
-        // Re-arm the heartbeat probe only when idle — never while a command owns the link (that
-        // overlap was the source of the connect/disconnect thrash). The re-arm leaves a pending
-        // StartDelay connect that survives app suspension, so the loop self-sustains.
-        if delayedConnectProbeActive && !commandConnectInFlight {
+        if isAppForeground && commandConnectInFlight {
+            // Foreground keep-alive: an unintended drop while we want to stay connected (a deliberate
+            // background/idle disconnect clears commandConnectInFlight first, so it won't reconnect).
+            log.default("[connectOnDemand] foreground keep-alive — reconnecting after drop")
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] foreground keep-alive — reconnecting after drop")
+            connectViaFreshDiscovery(peripheral)
+        } else if delayedConnectProbeActive && !commandConnectInFlight {
+            // Re-arm the heartbeat probe only when idle — never while a command owns the link (that
+            // overlap was the source of the connect/disconnect thrash). The re-arm leaves a pending
+            // StartDelay connect that survives app suspension, so the loop self-sustains.
             issueDelayedConnectProbe(peripheral)
         } else {
             resumeScanIfNeeded()
