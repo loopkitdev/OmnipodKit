@@ -702,13 +702,23 @@ class BluetoothManager: NSObject {
     }
 
     private func startScanning() {
+        let serviceUUID: CBUUID = podScanServiceUUID
+        let services: [CBUUID]?
+        let options: [String: Any]
+        if discoveryModeEnabled {
+            // Pairing: scan for the pod's main advertisement service so a new/unpaired pod is found.
+            // MUST take precedence over the low-power alarm scan (which filters on C005/C00A and would
+            // never see a pairing pod) and over scanningEnabled (pairing has to scan regardless).
+            services = [serviceUUID]
+            options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+            log.default("Start scanning (discovery/pairing filter=%{public}@)", serviceUUID.uuidString)
+            manager.scanForPeripherals(withServices: services, options: options)
+            return
+        }
         guard BluetoothManager.scanningEnabled else {
             log.default("[connectOnDemand] scanning disabled — not starting a scan (scan-free connect mode)")
             return
         }
-        let serviceUUID: CBUUID = podScanServiceUUID
-        let services: [CBUUID]?
-        let options: [String: Any]
         if BluetoothManager.lowPowerMonitorEnabled {
             // Option 3: wake only on an alarm-state advertisement. Filter on the alarm UUID(s), no
             // allowDuplicates. Takes precedence over the monitor/beacon scans.
