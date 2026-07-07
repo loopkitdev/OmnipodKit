@@ -328,9 +328,9 @@ class BluetoothManager: NSObject {
             self.log.default("[heartbeat] pid=%{public}d providesHeartbeat=%{public}@", pid, String(enabled))
             self.connectionDelegate?.omnipodLogDeviceEvent("[heartbeat] pid=\(pid) providesHeartbeat=\(enabled)")
             if enabled {
-                // Kick off the delayed-connect loop against the known pod (prefer an autoconnect one).
-                let device = self.devices.first(where: { self.autoConnectIDs.contains($0.manager.peripheral.identifier.uuidString) }) ?? self.devices.first
-                if let peripheral = device?.manager.peripheral {
+                // Kick off the delayed-connect loop against the known autoconnect pod (nil if no active
+                // pod — don't probe a stale/discarded device).
+                if let peripheral = self.keepAlivePeripheral {
                     self.issueDelayedConnectProbe(peripheral)
                 }
             } else {
@@ -662,10 +662,11 @@ class BluetoothManager: NSObject {
         connectViaFreshDiscovery(peripheral)
     }
 
-    /// The known/autoconnect pod peripheral, for foreground keep-alive and heartbeat.
+    /// The known/autoconnect pod peripheral, for foreground keep-alive and heartbeat. Returns nil when
+    /// there is no active pod (autoConnectIDs empty) — do NOT fall back to a stale device, or the
+    /// heartbeat probe churns against the discarded pod and clobbers pairing a new one.
     private var keepAlivePeripheral: CBPeripheral? {
-        let device = devices.first(where: { autoConnectIDs.contains($0.manager.peripheral.identifier.uuidString) }) ?? devices.first
-        return device?.manager.peripheral
+        return devices.first(where: { autoConnectIDs.contains($0.manager.peripheral.identifier.uuidString) })?.manager.peripheral
     }
 
     /// App entered the foreground: keep the pod connected so connection-gated UI is live and commands
@@ -1034,10 +1035,17 @@ extension BluetoothManager: CBCentralManagerDelegate {
             if discoveryModeEnabled {
                 connectionDelegate?.omnipodLogDeviceEvent("[pairing] heard pod \(peripheral.identifier.uuidString) pairable=\(podAdvertisement.pairable) state=\(peripheral.state.rawValue)")
             }
-            if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
-                // Connect to any pairable device, during discovery
-                log.default("Connecting to pairable device %{public} in discovery mode", peripheral)
-                timedConnect(peripheral)  // pairing — an explicit connect, not auto-reconnect
+            if discoveryModeEnabled && podAdvertisement.pairable {
+                // We've heard our target pairable pod — stop the discovery scan so it doesn't starve the
+                // connect (an active allowDuplicates scan wedges the connect in .connecting, which is
+                // what stalled pairing), then connect if it's disconnected. If it's already mid-connect,
+                // stopping the scan lets that connect complete.
+                if manager.isScanning { manager.stopScan() }
+                if peripheral.state == .disconnected {
+                    log.default("Connecting to pairable device %{public}@ in discovery mode", peripheral)
+                    connectionDelegate?.omnipodLogDeviceEvent("[pairing] connecting to pairable pod \(peripheral.identifier.uuidString)")
+                    timedConnect(peripheral)  // pairing — an explicit connect, not auto-reconnect
+                }
             } else if autoConnectIDs.contains(peripheral.identifier.uuidString) && peripheral.state == .disconnected {
                 log.debug("Reonnecting to autoconnect device")
                 autoReconnect(peripheral)
@@ -1140,7 +1148,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // probe alongside it. The two coexist — the scan is light and issueDelayedConnectProbe no
             // longer stops it. Re-arm the probe only when idle (never while a command owns the link).
             resumeScanIfNeeded()
-            if delayedConnectProbeActive && !commandConnectInFlight {
+            if delayedConnectProbeActive && !commandConnectInFlight && autoConnectIDs.contains(peripheral.identifier.uuidString) {
                 issueDelayedConnectProbe(peripheral)
             }
         }
@@ -1166,7 +1174,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
         delayedProbeInFlight = false
         resumeScanIfNeeded()   // keep the fault-listener alarm scan running while idle
-        if delayedConnectProbeActive && !commandConnectInFlight {
+        if delayedConnectProbeActive && !commandConnectInFlight && autoConnectIDs.contains(peripheral.identifier.uuidString) {
             issueDelayedConnectProbe(peripheral)   // re-arm so a failed connect doesn't stall the loop
         }
     }
