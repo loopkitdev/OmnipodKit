@@ -854,16 +854,24 @@ extension BluetoothManager: CBCentralManagerDelegate {
         guard let status = podStatusWord(from: advertisementData) else { return }
         let id = peripheral.identifier.uuidString
         guard lastPodStatusWord[id] != status else { return }   // only on change
+        // The 4-byte status word is [b0 b1 b2 b3]. b3 is the AlertSet bitmask (bit N = slot N firing);
+        // e.g. clear=…00, expiration-reminder(slot3)=…08. b1 carries a baseline 0x02 (slot1 "NotUsed")
+        // plus the same alert bit, so we log it too as a cross-check while enumerating alert types.
+        let bytes = Array(status)
+        let alertByte: UInt8 = bytes.count >= 4 ? bytes[3] : 0
+        let statusByte1: UInt8 = bytes.count >= 2 ? bytes[1] : 0
+        let alertSet = AlertSet(rawValue: alertByte)
         let wasAlert = lastPodStatusWord[id].map { $0 != BluetoothManager.podStatusClear }
-        let isAlert = status != BluetoothManager.podStatusClear
+        let isAlert = alertByte != 0
         lastPodStatusWord[id] = status
-        log.default("[POD-STATUS] %{public}@ status=%{public}@ (%{public}@) — connectionless detect",
-                    id, status.hexadecimalString, isAlert ? "non-clear/ALERT" : "clear")
-        connectionDelegate?.omnipodLogDeviceEvent("[POD-STATUS] status=\(status.hexadecimalString) (\(isAlert ? "non-clear/ALERT" : "clear")) — connectionless detect")
+        let slotDesc = alertSet.isEmpty ? "none" : alertSet.map { String(describing: $0) }.joined(separator: ",")
+        log.default("[POD-STATUS] %{public}@ status=%{public}@ alertByte=0x%{public}02x b1=0x%{public}02x slots=[%{public}@] — connectionless detect",
+                    id, status.hexadecimalString, alertByte, statusByte1, slotDesc)
+        connectionDelegate?.omnipodLogDeviceEvent("[POD-STATUS] status=\(status.hexadecimalString) alertByte=0x\(String(format: "%02x", alertByte)) b1=0x\(String(format: "%02x", statusByte1)) slots=[\(slotDesc)] — connectionless detect")
         if wasAlert != isAlert {
-            log.default("[POD-ALERT] %{public}@ → %{public}@ (from advertisement, no connect)",
-                        id, isAlert ? "ALERT ACTIVE" : "CLEARED")
-            connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → \(isAlert ? "ALERT ACTIVE" : "CLEARED") (from advertisement, no connect)")
+            log.default("[POD-ALERT] %{public}@ → %{public}@ slots=[%{public}@] (from advertisement, no connect)",
+                        id, isAlert ? "ALERT ACTIVE" : "CLEARED", slotDesc)
+            connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → \(isAlert ? "ALERT ACTIVE" : "CLEARED") slots=[\(slotDesc)] (from advertisement, no connect)")
         }
     }
 
