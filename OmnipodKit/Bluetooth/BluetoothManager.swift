@@ -95,11 +95,17 @@ protocol OmniConnectionDelegate: AnyObject {
     /// Tells the delegate a pump-provided heartbeat wake fired (a delayed-connect probe completed).
     /// The host (OmniPumpManager) turns this into pumpManagerBLEHeartbeatDidFire so Loop runs a cycle.
     func omnipodHeartbeatDidFire()
+
+    /// Tells the delegate a pod alert was detected connectionlessly (from the advertisement). The host
+    /// connects on demand and reads the real pod status, which surfaces the alert to Loop via the
+    /// normal getPodStatus -> alertsChanged -> issueAlert path. `slots` is the decoded firing AlertSet.
+    func omnipodDidDetectAlert(slots: AlertSet)
 }
 
 extension OmniConnectionDelegate {
     func omnipodLogDeviceEvent(_ message: String) {}
     func omnipodHeartbeatDidFire() {}
+    func omnipodDidDetectAlert(slots: AlertSet) {}
 }
 
 
@@ -879,6 +885,13 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.default("[POD-ALERT] %{public}@ → %{public}@ slots=[%{public}@] (from advertisement, no connect)",
                         id, isAlert ? "ALERT ACTIVE" : "CLEARED", slotDesc)
             connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → \(isAlert ? "ALERT ACTIVE" : "CLEARED") slots=[\(slotDesc)] (from advertisement, no connect)")
+            if isAlert {
+                // Stage 2: a fault just started firing — connect on demand and read the real pod status
+                // so the alert surfaces to Loop (getPodStatus -> alertsChanged -> issueAlert). Fires once
+                // per firing transition (detection is change-gated), so it won't re-trigger while the
+                // same alert persists.
+                connectionDelegate?.omnipodDidDetectAlert(slots: alertSet)
+            }
         }
     }
 

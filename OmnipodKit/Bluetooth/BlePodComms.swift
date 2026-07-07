@@ -772,6 +772,10 @@ extension BlePodComms: OmniConnectionDelegate {
         delegate?.omnipodHeartbeatDidFire()
     }
 
+    func omnipodDidDetectAlert(slots: AlertSet) {
+        delegate?.omnipodDidDetectAlert(slots: slots)
+    }
+
     func omnipodPeripheralWasRestored(manager: PeripheralManager) {
         if let podState = podState, manager.peripheral.identifier.uuidString == podState.bleIdentifier {
             log.bleDebug("omnipodPeripheralWasRestored for %@", manager.peripheral.identifier.uuidString)

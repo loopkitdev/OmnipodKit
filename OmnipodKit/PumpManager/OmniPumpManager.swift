@@ -382,6 +382,18 @@ public class OmniPumpManager: RileyLinkPumpManager {
         issueHeartbeatIfNeeded()
     }
 
+    func omnipodDidDetectAlert(slots: AlertSet) {
+        // A pod alert was detected connectionlessly (from the advertisement). Connect on demand and read
+        // the real pod status: getPodStatus surfaces newly-active alerts to Loop via alertsChanged ->
+        // issueAlert. This turns the low-power advert wake into a real Loop alert with accurate details.
+        logDeviceCommunication("[POD-ALERT] detected \(slots) from advertisement — fetching pod status to surface it", type: .connection)
+        getPodStatus(canOptimize: false) { result in
+            if case .failure(let error) = result {
+                self.log.error("omnipodDidDetectAlert: getPodStatus failed: %{public}@", String(describing: error))
+            }
+        }
+    }
+
     func omnipodPeripheralDidConnect(manager: PeripheralManager) {
         logDeviceCommunication("Pod connected \(manager.peripheral.identifier.uuidString)", type: .connection)
         notifyPodConnectionStateDidChange(isConnected: true)
