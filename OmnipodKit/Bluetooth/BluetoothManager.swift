@@ -595,8 +595,13 @@ class BluetoothManager: NSObject {
                 self.manager.cancelPeripheralConnection(peripheral)
             }
             self.commandConnectInFlight = true
-            self.log.default("[connectOnDemand] central.connect on managerQueue for %{public}@", peripheral.identifier.uuidString)
-            self.manager.connect(peripheral, options: nil)
+            // Fresh-discovery connect: briefly scan for the pod and connect on its just-heard advert
+            // (~1-2s) instead of a bare cold connect() that waits out iOS's duty-cycled reacquisition
+            // (~10-16s — the slow user-initiated Suspend). Falls back to a cold connect after 4s if the
+            // pod isn't heard. (The heartbeat probe still uses StartDelay; the two stay serialized via
+            // commandConnectInFlight.)
+            self.log.default("[connectOnDemand] fresh-discovery command connect for %{public}@", peripheral.identifier.uuidString)
+            self.connectViaFreshDiscovery(peripheral)
         }
     }
 
