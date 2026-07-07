@@ -356,6 +356,9 @@ class BluetoothManager: NSObject {
     /// Issue a connect with CBConnectPeripheralOptionStartDelayKey and record the time, for the
     /// timed-wake experiment. iOS holds the request for `delayedConnectProbeSeconds`, then connects.
     private func issueDelayedConnectProbe(_ peripheral: CBPeripheral) {
+        // Never run the heartbeat probe during pairing — its connect/disconnect churn clobbers the
+        // discovery scan (this blocked pairing a new pod after the old one was discarded).
+        guard !discoveryModeEnabled else { return }
         guard delayedConnectProbeActive, !delayedProbeInFlight, !commandConnectInFlight,
               peripheral.state == .disconnected else { return }
         let delay = BluetoothManager.delayedConnectProbeSeconds
@@ -553,6 +556,11 @@ class BluetoothManager: NSObject {
 
         // We will attempt to connect to all pairable devices when in discovery mode
         discoveryModeEnabled = true
+        connectionDelegate?.omnipodLogDeviceEvent("[pairing] discoverPods — scanning for a pairable pod")
+        // Quiet any in-flight heartbeat probe / stale connect churn so it doesn't clobber discovery.
+        delayedProbeInFlight = false
+        alarmScanSuppressed = false
+        manager.stopScan()
         for device in devices {
             let peripheral = device.manager.peripheral
             if peripheral.state == .disconnected || peripheral.state == .disconnecting {
@@ -712,6 +720,7 @@ class BluetoothManager: NSObject {
             services = [serviceUUID]
             options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
             log.default("Start scanning (discovery/pairing filter=%{public}@)", serviceUUID.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[pairing] scan started (filter=\(serviceUUID.uuidString))")
             manager.scanForPeripherals(withServices: services, options: options)
             return
         }
@@ -1021,7 +1030,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
             addPeripheral(peripheral, podAdvertisement: podAdvertisement)
-            
+
+            if discoveryModeEnabled {
+                connectionDelegate?.omnipodLogDeviceEvent("[pairing] heard pod \(peripheral.identifier.uuidString) pairable=\(podAdvertisement.pairable) state=\(peripheral.state.rawValue)")
+            }
             if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
                 // Connect to any pairable device, during discovery
                 log.default("Connecting to pairable device %{public} in discovery mode", peripheral)
