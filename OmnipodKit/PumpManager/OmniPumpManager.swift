@@ -1577,18 +1577,25 @@ extension OmniPumpManager {
         let optimizeInterval = TimeInterval(seconds: 115)
         let timeSinceLastResponse = -(self.state.podState?.podTimeUpdated ?? .distantPast).timeIntervalSinceNow
         let status: StatusResponse?
+        let didReadStatus: Bool
         if canOptimize && timeSinceLastResponse < optimizeInterval {
             self.log.debug("### skipping getStatus() with last status %@ ago", timeSinceLastResponse.timeIntervalStr)
             status = nil
+            didReadStatus = false
         } else {
             status = try? session.getStatus(noSeqGetStatus: true)
+            didReadStatus = true
         }
 
         // Silence any pending acknowledged alerts
         silenceAcknowledgedAlerts()
 
-        // If we have new status, store the dosesForStorage which updates lastPumpDataReportDate
-        if status != nil {
+        // Flush doses to Loop whenever we actually read (or attempted to read) status — NOT only when
+        // status != nil. A pod fault makes getStatus() throw (status stays nil), but handlePodFault has
+        // already finalized the in-progress bolus in podState (delivered = programmed − bolusNotDelivered).
+        // Without this, the incomplete dose sat unflushed until a later session (~30s), so Loop's IOB
+        // lagged the fault. dosesForStorage() is a no-op when there's nothing new.
+        if didReadStatus {
             session.dosesForStorage() { (doses) -> Bool in
                 return store(doses: doses, in: session)
             }
