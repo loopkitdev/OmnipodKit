@@ -589,6 +589,7 @@ class BluetoothManager: NSObject {
             guard let self = self else { return }
             if self.delayedProbeInFlight {
                 self.log.default("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
+                self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
                 self.delayedProbeInFlight = false
                 self.delayedProbeIssuedAt = nil
                 self.manager.cancelPeripheralConnection(peripheral)
@@ -960,6 +961,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if pendingHeartbeatFire {
             pendingHeartbeatFire = false
             log.default("[delayedConnect] firing heartbeat (pumpManagerBLEHeartbeatDidFire)")
+            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] firing heartbeat (pumpManagerBLEHeartbeatDidFire)")
             connectionDelegate?.omnipodHeartbeatDidFire()
         }
     }

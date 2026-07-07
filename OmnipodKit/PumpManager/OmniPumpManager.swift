@@ -364,6 +364,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
 
     private func issueHeartbeatIfNeeded() {
         if self.provideHeartbeat, dateGenerator().timeIntervalSince(lastHeartbeat) > .minutes(2) {
+            logDeviceCommunication("[heartbeat] pumpManagerBLEHeartbeatDidFire — Loop cycle triggered", type: .connection)
             self.pumpDelegate.notify { (delegate) in
                 delegate?.pumpManagerBLEHeartbeatDidFire(self)
             }
