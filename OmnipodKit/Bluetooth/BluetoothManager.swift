@@ -137,6 +137,10 @@ class BluetoothManager: NSObject {
     /// measurement the RE asked for — is there a usable periodic wake?).
     private var lastAdvSeen: [String: Date] = [:]
 
+    /// FAULT-CAPTURE: last full advert (svcUUIDs|mfg) device-logged per peripheral, so we record each
+    /// DISTINCT advert once (captures the fault transition without flooding the device log).
+    private var lastLoggedAdvKey: [String: String] = [:]
+
     /// Isolated to `managerQueue`
     private var discoveryModeEnabled: Bool = false
 
@@ -198,7 +202,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true   // FAULT-CAPTURE: wildcard scan to catch a fault advert on any UUID (revert after)
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
@@ -215,7 +219,7 @@ class BluetoothManager: NSObject {
     /// so we get a background fault wake but don't wake on every normal advert. Connect-on-demand
     /// (its own light helper scan) handles command connects.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false   // FAULT-CAPTURE: off so the wildcard beacon scan runs instead of the C005-only alarm scan (revert after)
     }
 
     /// Field-test master switch for the IDLE scan (startScanning). ON = run the alarm-filtered
@@ -289,7 +293,9 @@ class BluetoothManager: NSObject {
     /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
     private var isAppForeground = false
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
-    var appIsForeground: Bool { isAppForeground }
+    /// In fault-capture mode keep-alive is off so the pod stays disconnected + advertising for the
+    /// wildcard scan to record a fault advert.
+    var appIsForeground: Bool { isAppForeground && !BluetoothManager.beaconCaptureEnabled }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
@@ -657,7 +663,7 @@ class BluetoothManager: NSObject {
     private func enterForeground() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         isAppForeground = true
-        if let peripheral = keepAlivePeripheral, peripheral.state == .disconnected {
+        if !BluetoothManager.beaconCaptureEnabled, let peripheral = keepAlivePeripheral, peripheral.state == .disconnected {
             log.default("[connectOnDemand] foreground — pre-connecting for keep-alive")
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] foreground — pre-connecting for keep-alive")
             beginCommandConnect(peripheral)
@@ -913,9 +919,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 connectionDelegate?.omnipodDidDetectAlert(slots: alertSet)
                 // Re-wake quieting: the pod will keep advertising C005 while the alert persists; stop the
                 // alarm scan now so it doesn't keep waking us. resumeAlarmScanAfterAlertsCleared() lifts
-                // this once a connected read shows the alerts cleared.
-                alarmScanSuppressed = true
-                if manager.isScanning { manager.stopScan() }
+                // this once a connected read shows the alerts cleared. Skipped in fault-capture mode so
+                // the wildcard scan keeps recording adverts through a fault.
+                if !BluetoothManager.beaconCaptureEnabled {
+                    alarmScanSuppressed = true
+                    if manager.isScanning { manager.stopScan() }
+                }
             }
         }
     }
@@ -946,6 +955,15 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.default("%{public}@ %{public}@ dt=%{public}@s rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
                         tag, peripheral.identifier.uuidString, dt, RSSI, String(describing: peripheral.state.rawValue),
                         String(describing: connectable), name.isEmpty ? "-" : name, svcUUIDs.isEmpty ? "-" : svcUUIDs, mfg, svcData)
+            // FAULT-CAPTURE: record each DISTINCT advert to the device log (so a fault advert lands in the
+            // Issue Report). Deduped by svcUUIDs|mfg so we log a change once, not every ~1Hz frame.
+            if BluetoothManager.beaconCaptureEnabled {
+                let advKey = "\(svcUUIDs)|\(mfg)|conn=\(String(describing: connectable))"
+                if lastLoggedAdvKey[peripheral.identifier.uuidString] != advKey {
+                    lastLoggedAdvKey[peripheral.identifier.uuidString] = advKey
+                    connectionDelegate?.omnipodLogDeviceEvent("\(tag) svcUUIDs=[\(svcUUIDs.isEmpty ? "-" : svcUUIDs)] mfg=\(mfg) connectable=\(String(describing: connectable)) svcData=\(svcData)")
+                }
+            }
         } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
                   BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.beaconCaptureEnabled {
             // Suppressed in beacon-capture (wildcard) mode — this fired for every nearby BLE device.
@@ -1073,7 +1091,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             autoReconnect(peripheral)
         }
         delayedProbeInFlight = false
-        if isAppForeground && commandConnectInFlight {
+        if appIsForeground && commandConnectInFlight {
             // Foreground keep-alive: an unintended drop while we want to stay connected (a deliberate
             // background/idle disconnect clears commandConnectInFlight first, so it won't reconnect).
             log.default("[connectOnDemand] foreground keep-alive — reconnecting after drop")
