@@ -202,7 +202,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true   // FAULT-CAPTURE: wildcard scan to catch a fault advert on any UUID (revert after)
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
@@ -219,7 +219,7 @@ class BluetoothManager: NSObject {
     /// so we get a background fault wake but don't wake on every normal advert. Connect-on-demand
     /// (its own light helper scan) handles command connects.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false   // FAULT-CAPTURE: off so the wildcard beacon scan runs instead of the C005-only alarm scan (revert after)
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
     /// Field-test master switch for the IDLE scan (startScanning). ON = run the alarm-filtered
@@ -263,8 +263,11 @@ class BluetoothManager: NSObject {
     ///   deviceId GUESSED = pod address 179F0CF1 (TT 02=AS, 03=AST). UNCONFIRMED — no CE1F923D frame
     ///   has appeared in field capture; harmless if wrong (just won't match). Fix deviceId/byte-order
     ///   from a real [BEACON] capture before relying on these.
+    /// - `C00A`: CONFIRMED fault 2nd-UUID (captured occlusion 0x14 — the pod's 2nd service UUID went
+    ///   C001(normal)→C005(alert)→C00A(fault)). Include it so a fault wakes the low-power scan.
     static let alarmServiceUUIDs: [CBUUID] = [
         CBUUID(string: "C005"),
+        CBUUID(string: "C00A"),
         CBUUID(string: "CE1F923D-C539-48EA-7300-0A179F0CF102"),
         CBUUID(string: "CE1F923D-C539-48EA-7300-0A179F0CF103"),
     ]
@@ -889,43 +892,56 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // The 4-byte status word is [b0 b1 b2 b3]. b3 is the AlertSet bitmask (bit N = slot N firing);
         // e.g. clear=…00, expiration-reminder(slot3)=…08. b1 carries a baseline 0x02 (slot1 "NotUsed")
         // plus the same alert bit, so we log it too as a cross-check while enumerating alert types.
+        // The 4-byte status word is [b0 b1 b2 b3]:
+        //  - b3 = AlertSet bitmask (bit N = alert slot N FIRING); e.g. expiration-reminder(slot3)=0x08.
+        //  - b2 = FAULT code (0x00 in every non-fault state; = FaultEventCode on a fault, e.g. occlusion
+        //    0x14 — confirmed by a captured occlusion: word 00141400, connected read "0x14 Occluded").
+        //  - b1 = an "alert configured"/current-alarm byte (baseline 0x02, 0x0a with a reminder set,
+        //    and the fault code on a fault) — logged as a cross-check only.
         let bytes = Array(status)
         let alertByte: UInt8 = bytes.count >= 4 ? bytes[3] : 0
+        let faultByte: UInt8 = bytes.count >= 3 ? bytes[2] : 0
         let statusByte1: UInt8 = bytes.count >= 2 ? bytes[1] : 0
         let alertSet = AlertSet(rawValue: alertByte)
-        // Alert state is the b3 AlertSet bitmask (which slots are FIRING). b1 carries a separate
-        // "alert configured" bit (0x08) + baseline 0x02, so the resting advert can be …0a00 with
-        // nothing firing — comparing the whole word against a fixed "clear" mis-flags that. Track the
-        // previous FIRING byte so transitions are computed on the same basis as isAlert.
-        let prevAlertByte = lastPodStatusWord[id].flatMap { d -> UInt8? in
-            let b = Array(d); return b.count >= 4 ? b[3] : nil
-        } ?? 0
+        let prevBytes = lastPodStatusWord[id].map { Array($0) }
+        let prevAlertByte: UInt8 = (prevBytes?.count ?? 0) >= 4 ? prevBytes![3] : 0
+        let prevFaultByte: UInt8 = (prevBytes?.count ?? 0) >= 3 ? prevBytes![2] : 0
         let wasAlert = prevAlertByte != 0
         let isAlert = alertByte != 0
+        let wasFault = prevFaultByte != 0
+        let isFault = faultByte != 0
         lastPodStatusWord[id] = status
         let slotDesc = alertSet.isEmpty ? "none" : alertSet.map { String(describing: $0) }.joined(separator: ",")
-        log.default("[POD-STATUS] %{public}@ status=%{public}@ alertByte=0x%{public}02x b1=0x%{public}02x slots=[%{public}@] — connectionless detect",
-                    id, status.hexadecimalString, alertByte, statusByte1, slotDesc)
-        connectionDelegate?.omnipodLogDeviceEvent("[POD-STATUS] status=\(status.hexadecimalString) alertByte=0x\(String(format: "%02x", alertByte)) b1=0x\(String(format: "%02x", statusByte1)) slots=[\(slotDesc)] — connectionless detect")
-        if wasAlert != isAlert {
-            log.default("[POD-ALERT] %{public}@ → %{public}@ slots=[%{public}@] (from advertisement, no connect)",
-                        id, isAlert ? "ALERT ACTIVE" : "CLEARED", slotDesc)
-            connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → \(isAlert ? "ALERT ACTIVE" : "CLEARED") slots=[\(slotDesc)] (from advertisement, no connect)")
-            if isAlert {
-                // Stage 2: a fault just started firing — connect on demand and read the real pod status
-                // so the alert surfaces to Loop (getPodStatus -> alertsChanged -> issueAlert). Fires once
-                // per firing transition (detection is change-gated), so it won't re-trigger while the
-                // same alert persists.
-                connectionDelegate?.omnipodDidDetectAlert(slots: alertSet)
-                // Re-wake quieting: the pod will keep advertising C005 while the alert persists; stop the
-                // alarm scan now so it doesn't keep waking us. resumeAlarmScanAfterAlertsCleared() lifts
-                // this once a connected read shows the alerts cleared. Skipped in fault-capture mode so
-                // the wildcard scan keeps recording adverts through a fault.
-                if !BluetoothManager.beaconCaptureEnabled {
-                    alarmScanSuppressed = true
-                    if manager.isScanning { manager.stopScan() }
-                }
-            }
+        let faultDesc = isFault ? String(describing: FaultEventCode(rawValue: faultByte)) : "none"
+        log.default("[POD-STATUS] %{public}@ status=%{public}@ alertByte=0x%{public}02x faultByte=0x%{public}02x b1=0x%{public}02x slots=[%{public}@] fault=%{public}@ — connectionless detect",
+                    id, status.hexadecimalString, alertByte, faultByte, statusByte1, slotDesc, faultDesc)
+        connectionDelegate?.omnipodLogDeviceEvent("[POD-STATUS] status=\(status.hexadecimalString) alertByte=0x\(String(format: "%02x", alertByte)) faultByte=0x\(String(format: "%02x", faultByte)) slots=[\(slotDesc)] fault=\(faultDesc) — connectionless detect")
+
+        // A pod FAULT just appeared (b2 went non-zero): the pod has stopped delivery. Surface it.
+        if !wasFault && isFault {
+            log.default("[POD-FAULT] %{public}@ → FAULT 0x%{public}02x (%{public}@) (from advertisement, no connect)", id, faultByte, faultDesc)
+            connectionDelegate?.omnipodLogDeviceEvent("[POD-FAULT] → FAULT 0x\(String(format: "%02x", faultByte)) (\(faultDesc)) (from advertisement, no connect)")
+            surfacePodConditionAndQuiet(alertSet: alertSet)
+        } else if !wasAlert && isAlert {
+            // An alert slot just started firing.
+            log.default("[POD-ALERT] %{public}@ → ALERT ACTIVE slots=[%{public}@] (from advertisement, no connect)", id, slotDesc)
+            connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → ALERT ACTIVE slots=[\(slotDesc)] (from advertisement, no connect)")
+            surfacePodConditionAndQuiet(alertSet: alertSet)
+        } else if (wasAlert && !isAlert) || (wasFault && !isFault) {
+            log.default("[POD-ALERT] %{public}@ → CLEARED slots=[%{public}@] (from advertisement, no connect)", id, slotDesc)
+            connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → CLEARED slots=[\(slotDesc)] (from advertisement, no connect)")
+        }
+    }
+
+    /// Connect on demand + read the real pod status so a connectionless-detected alert/fault surfaces to
+    /// Loop (getPodStatus -> alertsChanged/issueAlert or fault handling), then quiet the alarm scan while
+    /// the condition persists (re-wake quieting; lifted by resumeAlarmScanAfterAlertsCleared()).
+    private func surfacePodConditionAndQuiet(alertSet: AlertSet) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        connectionDelegate?.omnipodDidDetectAlert(slots: alertSet)
+        if !BluetoothManager.beaconCaptureEnabled {   // capture mode keeps the wildcard scan recording
+            alarmScanSuppressed = true
+            if manager.isScanning { manager.stopScan() }
         }
     }
 
