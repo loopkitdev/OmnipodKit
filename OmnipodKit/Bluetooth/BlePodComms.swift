@@ -776,6 +776,12 @@ extension BlePodComms: OmniConnectionDelegate {
         delegate?.omnipodDidDetectAlert(slots: slots)
     }
 
+    /// Lift the fault-listener re-wake suppression once all pod alerts have cleared (OmniPumpManager
+    /// calls this from a connected status read).
+    func resumeAlarmScanAfterAlertsCleared() {
+        bluetoothManager?.resumeAlarmScanAfterAlertsCleared()
+    }
+
     func omnipodPeripheralWasRestored(manager: PeripheralManager) {
         if let podState = podState, manager.peripheral.identifier.uuidString == podState.bleIdentifier {
             log.bleDebug("omnipodPeripheralWasRestored for %@", manager.peripheral.identifier.uuidString)

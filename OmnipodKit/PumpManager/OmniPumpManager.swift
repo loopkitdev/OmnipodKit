@@ -3087,6 +3087,10 @@ extension OmniPumpManager: PumpManager {
         for alert in removed {
             log.default("Alert slot cleared: %{public}@", String(describing: alert))
         }
+        // Re-wake quieting: once all pod alerts have cleared, let the connectionless alarm scan resume.
+        if newAlerts.isEmpty {
+            (podComms as? BlePodComms)?.resumeAlarmScanAfterAlertsCleared()
+        }
     }
 
     private func getPumpManagerAlert(for podAlert: PodAlert, slot: AlertSlot) -> PumpManagerAlert? {

@@ -126,6 +126,13 @@ class BluetoothManager: NSObject {
     /// Last-seen DASH advertisement status word per peripheral, for connectionless alert detection.
     private var lastPodStatusWord: [String: Data] = [:]
 
+    /// Re-wake quieting: true while a detected alert is being surfaced/active. A persisting alert keeps
+    /// the pod advertising `C005`, so the alarm scan would keep waking us (harmless — re-processing is
+    /// change-gated — but it churns the radio and nudges the heartbeat probe). We stop the alarm scan
+    /// once an alert is surfaced and resume it when all alerts clear (via a connected status read).
+    /// New faults are still caught within the heartbeat cadence while suppressed. managerQueue-isolated.
+    private var alarmScanSuppressed = false
+
     /// Last advertisement timestamp per peripheral, to log inter-frame cadence (the DS-beacon-rate
     /// measurement the RE asked for — is there a usable periodic wake?).
     private var lastAdvSeen: [String: Date] = [:]
@@ -728,10 +735,23 @@ class BluetoothManager: NSObject {
     /// Only when nothing is connected, so we never scan while a command is using the link.
     private func resumeScanIfNeeded() {
         guard BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled || BluetoothManager.lowPowerMonitorEnabled else { return }
+        guard !alarmScanSuppressed else { return }   // an alert is active — stay quiet (re-wake quieting)
         guard manager?.state == .poweredOn, !manager.isScanning else { return }
         guard !devices.contains(where: { $0.manager.peripheral.state == .connected || $0.manager.peripheral.state == .connecting }) else { return }
         log.default("[connectOnDemand] resuming scan after connect attempt")
         startScanning()
+    }
+
+    /// Called (via BlePodComms) when a connected status read shows all pod alerts cleared: lift the
+    /// re-wake suppression and resume the connectionless alarm scan.
+    func resumeAlarmScanAfterAlertsCleared() {
+        managerQueue.async { [weak self] in
+            guard let self = self, self.alarmScanSuppressed else { return }
+            self.alarmScanSuppressed = false
+            self.log.default("[POD-ALERT] alerts cleared — resuming alarm scan")
+            self.connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] alerts cleared — resuming alarm scan")
+            self.resumeScanIfNeeded()
+        }
     }
 
     // MARK: - Accessors
@@ -891,6 +911,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 // per firing transition (detection is change-gated), so it won't re-trigger while the
                 // same alert persists.
                 connectionDelegate?.omnipodDidDetectAlert(slots: alertSet)
+                // Re-wake quieting: the pod will keep advertising C005 while the alert persists; stop the
+                // alarm scan now so it doesn't keep waking us. resumeAlarmScanAfterAlertsCleared() lifts
+                // this once a connected read shows the alerts cleared.
+                alarmScanSuppressed = true
+                if manager.isScanning { manager.stopScan() }
             }
         }
     }
