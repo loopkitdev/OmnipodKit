@@ -205,13 +205,16 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
-    /// Field-test master switch: when OFF, ALL scanning is disabled (idle/alarm/monitor/beacon AND
-    /// the connect-on-demand fresh-discovery helper). Connect-on-demand then issues a plain connect()
-    /// on the recovered peripheral and lets iOS reacquire it — no scan involved. Set to measure a
-    /// pure, scan-free connect latency. (The connectionless [ADV]/[POD-ALERT] detection is a scan
-    /// feature, so it's inert while this is off.)
+    /// Field-test master switch for the IDLE scan (startScanning). ON = run the alarm-filtered
+    /// low-power scan while disconnected — the unsolicited fault listener: iOS wakes us only on an
+    /// alert advertisement (`C005`), so `detectPodAlertStatus` catches faults connectionlessly (zero
+    /// wakes in normal operation). OFF = no idle scan (pure scan-free connect measurement).
+    /// NOTE: command connects use fresh-discovery (a direct scanForPeripherals) either way; this only
+    /// governs the idle listener. NOTE: while a heartbeat StartDelay probe is active it stops this scan
+    /// to avoid starving the probe connect — so fault-listening + heartbeat don't yet fully coexist
+    /// (test the listener with a BLE CGM present, i.e. heartbeat off).
     static var scanningEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? false
+        UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? true
     }
 
     /// Measurement mode (field-test only): skip ALL pod commands so the pod is left idle-disconnected
@@ -853,9 +856,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
         lastPodStatusWord[id] = status
         log.default("[POD-STATUS] %{public}@ status=%{public}@ (%{public}@) — connectionless detect",
                     id, status.hexadecimalString, isAlert ? "non-clear/ALERT" : "clear")
+        connectionDelegate?.omnipodLogDeviceEvent("[POD-STATUS] status=\(status.hexadecimalString) (\(isAlert ? "non-clear/ALERT" : "clear")) — connectionless detect")
         if wasAlert != isAlert {
             log.default("[POD-ALERT] %{public}@ → %{public}@ (from advertisement, no connect)",
                         id, isAlert ? "ALERT ACTIVE" : "CLEARED")
+            connectionDelegate?.omnipodLogDeviceEvent("[POD-ALERT] → \(isAlert ? "ALERT ACTIVE" : "CLEARED") (from advertisement, no connect)")
         }
     }
 
