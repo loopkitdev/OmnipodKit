@@ -546,10 +546,12 @@ class BluetoothManager: NSObject {
             self.manager.stopScan()
             self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID], options: nil)
             self.log.default("[connectOnDemand] fresh-discovery scan for %{public}@", id)
+            self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] fresh-discovery scan started")
             self.managerQueue.asyncAfter(deadline: .now() + 4.0) { [weak self] in
                 guard let self = self, self.pendingFreshConnectID == id else { return }
                 self.pendingFreshConnectID = nil
                 self.log.default("[connectOnDemand] no fresh discovery in 4s — direct (cold) connect")
+                self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] no fresh discovery in 4s — cold connect fallback")
                 self.manager.stopScan()
                 self.freshConnect(peripheral)
             }
@@ -842,13 +844,16 @@ extension BluetoothManager: CBCentralManagerDelegate {
             if pendingFreshConnectID == peripheral.identifier.uuidString {
                 pendingFreshConnectID = nil
                 log.default("[connectOnDemand] fresh discovery -> connect %{public}@", peripheral.identifier.uuidString)
+                connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] pod heard -> connecting on fresh advert")
                 manager.stopScan()
                 // Defer the connect one managerQueue tick so the scan actually tears down first.
                 // Connecting synchronously here (still inside the scan's didDiscover) starved the
                 // connect -> it wedged in .connecting and timed out at 20s. Let iOS settle the
-                // stopScan, then connect fully dark on the just-heard advert.
+                // stopScan, then connect on the just-heard advert. Direct connect (not freshConnect):
+                // the peripheral was just heard and is connectable, so skip the cancel+re-retrieve
+                // stale-flush (an In-Play stall workaround) that added a round-trip on the good pod.
                 managerQueue.async { [weak self] in
-                    self?.freshConnect(peripheral)
+                    self?.manager.connect(peripheral, options: nil)
                 }
             }
             // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
