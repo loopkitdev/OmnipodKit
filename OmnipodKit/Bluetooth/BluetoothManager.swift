@@ -337,9 +337,11 @@ class BluetoothManager: NSObject {
         guard delayedConnectProbeActive, !delayedProbeInFlight, !commandConnectInFlight,
               peripheral.state == .disconnected else { return }
         let delay = BluetoothManager.delayedConnectProbeSeconds
-        // Stop the allowDuplicates scan so it doesn't starve the post-delay connect (iOS reacquires the
-        // pod on its own — it advertises ~1Hz). The scan resumes on the probe's disconnect.
-        if manager.isScanning { manager.stopScan() }
+        // Fault-listener coexistence: keep the alarm-filtered scan (C005, non-allowDuplicates — light)
+        // running alongside the StartDelay probe, so faults are still caught during the ~5-min heartbeat
+        // wait. Only a HEAVY allowDuplicates scan (monitor/beacon mode) starves the connect, so stop
+        // just that. didConnect stops whatever scan remains for the duration of the connection.
+        if manager.isScanning, !BluetoothManager.lowPowerMonitorEnabled { manager.stopScan() }
         delayedProbeInFlight = true
         delayedProbeIssuedAt = Date()
         let pid = ProcessInfo.processInfo.processIdentifier
@@ -658,9 +660,10 @@ class BluetoothManager: NSObject {
         if peripheral.state == .connected || peripheral.state == .connecting {
             log.default("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
-            manager.cancelPeripheralConnection(peripheral)   // didDisconnect arms the probe
+            manager.cancelPeripheralConnection(peripheral)   // didDisconnect resumes scan + arms probe
         } else {
-            issueDelayedConnectProbe(peripheral)             // already disconnected — arm directly
+            resumeScanIfNeeded()                             // fault-listener scan while idle
+            issueDelayedConnectProbe(peripheral)             // + heartbeat probe alongside (if needed)
         }
     }
 
@@ -1023,13 +1026,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.default("[connectOnDemand] foreground keep-alive — reconnecting after drop")
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] foreground keep-alive — reconnecting after drop")
             connectViaFreshDiscovery(peripheral)
-        } else if delayedConnectProbeActive && !commandConnectInFlight {
-            // Re-arm the heartbeat probe only when idle — never while a command owns the link (that
-            // overlap was the source of the connect/disconnect thrash). The re-arm leaves a pending
-            // StartDelay connect that survives app suspension, so the loop self-sustains.
-            issueDelayedConnectProbe(peripheral)
         } else {
+            // Idle: run the fault-listener alarm scan, AND (if a heartbeat is needed) arm the StartDelay
+            // probe alongside it. The two coexist — the scan is light and issueDelayedConnectProbe no
+            // longer stops it. Re-arm the probe only when idle (never while a command owns the link).
             resumeScanIfNeeded()
+            if delayedConnectProbeActive && !commandConnectInFlight {
+                issueDelayedConnectProbe(peripheral)
+            }
         }
         // If this disconnect ended a heartbeat-probe wake, fire the heartbeat now (clean idle state) so
         // Loop runs its cycle; its commands then preempt the just-armed probe via connect-on-demand.
@@ -1052,10 +1056,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
             autoReconnect(peripheral)
         }
         delayedProbeInFlight = false
+        resumeScanIfNeeded()   // keep the fault-listener alarm scan running while idle
         if delayedConnectProbeActive && !commandConnectInFlight {
             issueDelayedConnectProbe(peripheral)   // re-arm so a failed connect doesn't stall the loop
-        } else {
-            resumeScanIfNeeded()
         }
     }
 }
