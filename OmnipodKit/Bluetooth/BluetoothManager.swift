@@ -250,13 +250,13 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? false
     }
 
-    /// EXPERIMENT (revert after): suppress the delayed-connect heartbeat probe entirely, so the idle
-    /// alarm scan runs with NO pending StartDelay connect. Tests whether a pending connect starves the
-    /// background scan's advert delivery (the suspected cause of ~5-min deep-idle detection latency).
-    /// Default ON for this test build. NOTE: with no probe and no BLE CGM, Loop gets no periodic wake —
-    /// fine for measuring alert-detection latency (the detection itself triggers getPodStatus).
+    /// Debug knob (default OFF): suppress the delayed-connect heartbeat probe so the idle alarm scan
+    /// runs with NO pending StartDelay connect. An experiment (2026-07-08) showed the probe is NOT
+    /// starving the scan — it's the reliable background WAKE: with it suppressed, a deep-idle alert
+    /// fired but was not detected until the app was reopened. So the alarm scan is best-effort and the
+    /// probe bounds detection latency. Left as a knob for future measurement; keep OFF in normal use.
     static var heartbeatProbeSuppressed: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? false
     }
 
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +

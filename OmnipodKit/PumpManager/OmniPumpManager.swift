@@ -1871,13 +1871,13 @@ extension OmniPumpManager {
                 case .success(let session):
                     self.handleSilencePodEnd(session: session)
                     let podTime = self.podTime
-                    let alertPodTime = podTime + TimeInterval(seconds: 300)  // EXPERIMENT: fire ~5min out so the app is DEEP-idle when it fires (measure background scan latency)
+                    let alertPodTime = podTime + TimeInterval(seconds: 60)  // fire ~60s from now (mirrors updateExpirationReminder math)
                     let testAlert = PodAlert.expirationReminder(offset: podTime, absAlertTime: alertPodTime, silent: false)
                     do {
                         let beepBlock = self.beepMessageBlock(beepType: .beep)
                         let _ = try session.configureAlerts([testAlert], beepBlock: beepBlock)
-                        self.log.default("[testAlert] scheduled expirationReminder to fire in ~5min (podTime=%{public}@, alertPodTime=%{public}@)", podTime.timeIntervalStr, alertPodTime.timeIntervalStr)
-                        self.logDeviceCommunication("[testAlert] scheduled expirationReminder to fire in ~5min (alertPodTime=\(alertPodTime.timeIntervalStr))", type: .connection)
+                        self.log.default("[testAlert] scheduled expirationReminder to fire in ~60s (podTime=%{public}@, alertPodTime=%{public}@)", podTime.timeIntervalStr, alertPodTime.timeIntervalStr)
+                        self.logDeviceCommunication("[testAlert] scheduled expirationReminder to fire in ~60s (alertPodTime=\(alertPodTime.timeIntervalStr))", type: .connection)
                         continuation.resume()
                     } catch {
                         continuation.resume(throwing: error)
