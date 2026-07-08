@@ -256,7 +256,7 @@ class BluetoothManager: NSObject {
     /// fired but was not detected until the app was reopened. So the alarm scan is best-effort and the
     /// probe bounds detection latency. Left as a knob for future measurement; keep OFF in normal use.
     static var heartbeatProbeSuppressed: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? true   // FAULT-WAKE GROUND-TRUTH TEST: probe OFF so only the alarm scan can wake us on a deep-idle fault (revert after)
+        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? false   // probe ON: production config (probe + alarm scan coexisting) — confirm the scan still wakes fast on a deep-idle fault
     }
 
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
