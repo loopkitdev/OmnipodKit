@@ -202,7 +202,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true   // ALERT-ADVERT CAPTURE: wildcard scan + device-log full adverts to diff configured vs firing UUIDs (revert after)
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
