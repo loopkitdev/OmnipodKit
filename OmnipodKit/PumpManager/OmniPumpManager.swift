@@ -1577,25 +1577,26 @@ extension OmniPumpManager {
         let optimizeInterval = TimeInterval(seconds: 115)
         let timeSinceLastResponse = -(self.state.podState?.podTimeUpdated ?? .distantPast).timeIntervalSinceNow
         let status: StatusResponse?
-        let didReadStatus: Bool
         if canOptimize && timeSinceLastResponse < optimizeInterval {
             self.log.debug("### skipping getStatus() with last status %@ ago", timeSinceLastResponse.timeIntervalStr)
             status = nil
-            didReadStatus = false
         } else {
             status = try? session.getStatus(noSeqGetStatus: true)
-            didReadStatus = true
+            if status == nil {
+                // Had some comms error or perhaps a pod fault. Evaluate pod's
+                // status in case it has change to trigger updates to clients.
+                evaluateStatus()
+            }
         }
 
         // Silence any pending acknowledged alerts
         silenceAcknowledgedAlerts()
 
-        // Flush doses to Loop whenever we actually read (or attempted to read) status — NOT only when
-        // status != nil. A pod fault makes getStatus() throw (status stays nil), but handlePodFault has
-        // already finalized the in-progress bolus in podState (delivered = programmed − bolusNotDelivered).
-        // Without this, the incomplete dose sat unflushed until a later session (~30s), so Loop's IOB
-        // lagged the fault. dosesForStorage() is a no-op when there's nothing new.
-        if didReadStatus {
+        // If we have a status return or if the pod is currently faulted, store dosesForStorage — updates
+        // lastPumpDataReportDate and saves any updated doses to the client, including the in-progress
+        // bolus finalized by handlePodFault on a fault (upstream loopandlearn #99; supersedes our earlier
+        // didReadStatus flush for the incomplete-dose-on-fault case).
+        if status != nil || state.podState?.isFaulted == true {
             session.dosesForStorage() { (doses) -> Bool in
                 return store(doses: doses, in: session)
             }
@@ -1618,7 +1619,8 @@ extension OmniPumpManager {
 
         // Don't use guard state.hasActivePod here as it prevents getPodStatus from working
         // after the pod has been paired, but before the pod setup process has been completed.
-        guard state.podState?.setupProgress.isPaired == true, state.podState?.fault == nil else {
+        // Instead just verify that the pod is at least paired and not faulted.
+        guard state.podState?.setupProgress.isPaired == true, state.podState?.isFaulted == false else {
             completion?(.failure(PumpManagerError.configuration(OmniPumpManagerError.noPodPaired)))
             return
         }
@@ -1757,7 +1759,8 @@ extension OmniPumpManager {
         /// For now just disable this enforcement to match the previous behavior.
         //for entry in schedule.entries {
         //    guard entry.rate <= state.maxBasalRateUnitsPerHour else {
-        //        return .failure(PumpManagerError.configuration(OmniPumpManagerError.invalidSetting))
+        //        completion(PumpManagerError.configuration(OmniPumpManagerError.invalidSetting))
+        //        return
         //    }
         //}
 
@@ -2712,9 +2715,13 @@ extension OmniPumpManager: PumpManager {
     }
 
     public func runTemporaryBasalProgram(decisionId: UUID?, unitsPerHour: Double, for duration: TimeInterval, automatic: Bool, completion: @escaping (PumpManagerError?) -> Void) {
-        guard unitsPerHour <= state.maxBasalRateUnitsPerHour else {
-            completion(.configuration(OmniPumpManagerError.invalidSetting))
-            return
+        if unitsPerHour > state.maxBasalRateUnitsPerHour {
+            /// The app is trying to set a TBR above the configured max basal. This can happen if the
+            /// app isn't properly sync'ing its max basal rate to the Pump Manager. Rather than returning
+            /// an invalidSetting error that could stop looping, log and continue (loopandlearn #85
+            /// workaround for mismatched basal limits).
+            log.error("@@@ runTemporaryBasalProgram requested unitsPerHour %{public}@ exceeds configured maxBasal of %{public}@!",
+                      String(describing: unitsPerHour), String(describing: state.maxBasalRateUnitsPerHour))
         }
 
         guard self.hasActivePod, let podState = self.state.podState else {
@@ -2879,10 +2886,13 @@ extension OmniPumpManager: PumpManager {
             if let maxBasalRate = deliveryLimits.maximumBasalRate?.doubleValue(for: .internationalUnitsPerHour),
                let maxBolus = deliveryLimits.maximumBolus?.doubleValue(for: .internationalUnit)
             {
+                log.debug("@@@ syncDeliveryLimits setting maxBasalRate to %{public}@ and maxBolus to %{public}@",
+                          String(describing: maxBasalRate), String(describing: maxBolus))
                 state.maxBasalRateUnitsPerHour = maxBasalRate
                 state.maxBolusUnits = maxBolus
                 completion(.success(deliveryLimits))
             } else {
+                log.error("@@@ syncDeliveryLimits failed with deliveryLimits of %{public}@", String(describing: deliveryLimits))
                 completion(.failure(OmniPumpManagerError.invalidSetting))
             }
         }
