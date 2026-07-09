@@ -202,7 +202,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true   // FAULT-TYPE CAPTURE: wildcard scan + full-advert [ADV] logging to see the empty-reservoir fault's UUIDs/mfg (revert after)
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
@@ -219,7 +219,7 @@ class BluetoothManager: NSObject {
     /// so we get a background fault wake but don't wake on every normal advert. Connect-on-demand
     /// (its own light helper scan) handles command connects.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false   // FAULT-TYPE CAPTURE: off so beaconCapture wildcard scan runs — see the empty-reservoir fault's full advert UUIDs (revert after)
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
     /// Field-test master switch for the IDLE scan (startScanning). ON = run the alarm-filtered
@@ -239,24 +239,6 @@ class BluetoothManager: NSObject {
     /// see whether a CE1F923D beacon ever appears, without connect churn stopping the scan.
     static var suppressCommandsEnabled: Bool {
         UserDefaults.standard.object(forKey: "OmnipodKit.suppressCommandsEnabled") as? Bool ?? false
-    }
-
-    /// Experiment: after each disconnect, issue a connect with CBConnectPeripheralOptionStartDelayKey
-    /// so iOS holds the request pending for N seconds, then completes it (the pod advertises ~1Hz, so
-    /// it connects ~immediately once the delay elapses). Testing whether a delayed connect gives a
-    /// timed background WAKE — the periodic wake the scan path can't (stable payload coalesces). Loop:
-    /// discover -> delayed-connect(N) -> didConnect (measure) -> brief hold -> disconnect -> repeat.
-    static var delayedConnectProbeEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? false
-    }
-
-    /// Debug knob (default OFF = probe ON): suppress the delayed-connect heartbeat probe so the idle
-    /// alarm scan runs with NO pending StartDelay connect. Experiments (2026-07-08): the probe is the
-    /// heartbeat + the deep-idle surfacing path for ALERTS (which the scan can't wake on — no UUID
-    /// change). FAULTS wake the C00A-only scan directly (<1min, fresh discovery). Both run in production.
-    /// Left as a knob for future measurement; keep OFF in normal use.
-    static var heartbeatProbeSuppressed: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? false
     }
 
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
@@ -327,11 +309,12 @@ class BluetoothManager: NSObject {
     /// demand. managerQueue-isolated.
     private var heartbeatEnabled = false
 
-    /// The delayed-connect loop is active when the host requests a heartbeat OR the manual test flag
-    /// is set. Isolated to managerQueue (all probe call sites run there).
+    /// The delayed-connect (StartDelay) heartbeat probe runs exactly when Loop asks the pump to provide
+    /// the BLE heartbeat — i.e. `heartbeatEnabled`, set via PumpManager.setMustProvideBLEHeartbeat. No
+    /// other gate: whenever the host needs a pump-provided heartbeat, the connect-delay probe is active.
+    /// Isolated to managerQueue (all probe call sites run there).
     private var delayedConnectProbeActive: Bool {
-        if BluetoothManager.heartbeatProbeSuppressed { return false }   // EXPERIMENT: scan-only, no probe
-        return heartbeatEnabled || BluetoothManager.delayedConnectProbeEnabled
+        heartbeatEnabled
     }
 
     /// Enable/disable the pump-provided heartbeat (delayed-connect loop). Driven by
