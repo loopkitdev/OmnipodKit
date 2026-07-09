@@ -1021,9 +1021,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.default("%{public}@ %{public}@ dt=%{public}@s rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
                         tag, peripheral.identifier.uuidString, dt, RSSI, String(describing: peripheral.state.rawValue),
                         String(describing: connectable), name.isEmpty ? "-" : name, svcUUIDs.isEmpty ? "-" : svcUUIDs, mfg, svcData)
-            // FAULT-CAPTURE: record each DISTINCT advert to the device log (so a fault advert lands in the
-            // Issue Report). Deduped by svcUUIDs|mfg so we log a change once, not every ~1Hz frame.
-            if BluetoothManager.beaconCaptureEnabled {
+            // Field advert logging (kept in production): record each DISTINCT pod advert to the device log
+            // so real-world Issue Reports capture what the pod advertises — the raw material for decoding
+            // more fault/alert states. Deduped by svcUUIDs|mfg (the advert is stable between state changes,
+            // so this logs a transition once, not every ~1Hz frame). Fires whenever we discover the pod —
+            // i.e. during each command connect's fresh-discovery scan and on a C00A fault-scan wake.
+            if isPodFrame {
                 let advKey = "\(svcUUIDs)|\(mfg)|conn=\(String(describing: connectable))"
                 if lastLoggedAdvKey[peripheral.identifier.uuidString] != advKey {
                     lastLoggedAdvKey[peripheral.identifier.uuidString] = advKey
