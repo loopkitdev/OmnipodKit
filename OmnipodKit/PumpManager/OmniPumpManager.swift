@@ -3190,7 +3190,7 @@ extension OmniPumpManager: PumpManager {
     func store(doses: [UnfinalizedDose], in session: PodCommsSession) -> Bool {
         session.assertOnSessionQueue()
 
-        // We block the session until the data's confirmed stored by the delegate
+        // We block the session until the data's confirmed stored by the delegate.
         let semaphore = DispatchSemaphore(value: 0)
         var success = false
 
@@ -3199,7 +3199,18 @@ extension OmniPumpManager: PumpManager {
             semaphore.signal()
         }
 
-        semaphore.wait()
+        // Bounded wait to guarantee liveness. The completion is dispatched to the delegate queue (Loop's
+        // is .main), while this runs on the pod command queue HOLDING podStateLock (BlePodComms.bleRunSession).
+        // If the main thread is itself blocked acquiring podStateLock — e.g. a concurrent forgetPod /
+        // handleDiscardedPodDosing during pod deactivation — an untimed wait() deadlocks the command queue
+        // forever (observed: deactivating a faulted pod hung ~10 min until force-kill). On timeout, bail and
+        // return false so dosesForStorage RETAINS the doses for a later flush (re-storing is idempotent —
+        // DoseStore dedupes by syncIdentifier). Returning unwinds the session and releases podStateLock,
+        // breaking the deadlock. Legitimate stores complete in well under a second.
+        if semaphore.wait(timeout: .now() + .seconds(10)) == .timedOut {
+            self.log.error("store(doses:) timed out waiting for delegate confirmation — retaining %d dose(s) for retry (avoids podStateLock deadlock)", doses.count)
+            return false
+        }
 
         if success {
             setState { (state) in
