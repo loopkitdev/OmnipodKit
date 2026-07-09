@@ -14,7 +14,6 @@ import HealthKit
 
 
 protocol DiagnosticCommands {
-    func triggerTestAlert() async throws
     func playTestBeeps() async throws
     func readPulseLog() async throws -> String
     func readPulseLogPlus() async throws -> String
@@ -44,15 +43,6 @@ struct PodDiagnosticsView: View  {
                 try await diagnosticCommands.playTestBeeps()
             })) {
                 FrameworkLocalText("Play Test Beeps", comment: "Text for play test beeps navigation link")
-                    .foregroundColor(Color.primary)
-            }
-            .disabled(!podOk)
-
-            // DEBUG (field test): fire a real non-fault alert ~60s out to capture the beacon (§5).
-            Button(action: {
-                Task { try? await diagnosticCommands.triggerTestAlert() }
-            }) {
-                Text("Trigger Test Alert (debug, fires in ~60s)")
                     .foregroundColor(Color.primary)
             }
             .disabled(!podOk)

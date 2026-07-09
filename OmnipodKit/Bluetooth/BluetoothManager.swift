@@ -196,18 +196,6 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.connectOnDemandEnabled") as? Bool ?? true
     }
 
-    /// §5 beacon-capture: scan withServices:nil (foreground, allowDuplicates) so we catch the pod's
-    /// alarm/beacon advertisement even if it advertises a service UUID we don't yet filter on (e.g.
-    /// the CE1F923D-… alarm beacon). Logs full raw fields for any pod-adjacent or CE1F923D frame so a
-    /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
-    /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
-    static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
-    }
-
-    /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
-    static let beaconUUIDPrefix = "CE1F923D-C539-48EA-7300-0A"
-
     /// Low-power fault-watch (option 3): scan filtered on the DASH ALARM service UUID(s) with
     /// allowDuplicates OFF, so iOS only wakes us when the pod enters an alarm state (2nd service
     /// UUID flips to an alarm value) — zero wakes during normal operation, and it survives into the
@@ -234,13 +222,6 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? true
     }
 
-    /// Measurement mode (field-test only): skip ALL pod commands so the pod is left idle-disconnected
-    /// and the wildcard scan runs uninterrupted — a clean window to measure the advert cadence and
-    /// see whether a CE1F923D beacon ever appears, without connect churn stopping the scan.
-    static var suppressCommandsEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.suppressCommandsEnabled") as? Bool ?? false
-    }
-
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
     /// an iOS reacquisition tail (~40s observed), so 300 → wake ~340s.
     static var delayedConnectProbeSeconds: Int {
@@ -250,10 +231,6 @@ class BluetoothManager: NSObject {
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
     /// - `C005`: CONFIRMED 16-bit alarm 2nd-UUID on this pod (expiration reminder). Extend as more
     ///   alert/alarm types are captured.
-    /// - The 128-bit AS/AST are the RE binary model `CE1F923D-C539-48EA-7300-0A<deviceId><TT>` with
-    ///   deviceId GUESSED = pod address 179F0CF1 (TT 02=AS, 03=AST). UNCONFIRMED — no CE1F923D frame
-    ///   has appeared in field capture; harmless if wrong (just won't match). Fix deviceId/byte-order
-    ///   from a real [BEACON] capture before relying on these.
     /// - `C00A`: CONFIRMED fault 2nd-UUID (captured occlusion 0x14 — the pod's 2nd service UUID went
     ///   C001(normal)→C005(alert)→C00A(fault)). Include it so a fault wakes the low-power scan.
     /// C00A-ONLY fault scan (the adopted design; validated 2026-07-08). scanForPeripherals(withServices:)
@@ -293,9 +270,7 @@ class BluetoothManager: NSObject {
     /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
     private var isAppForeground = false
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
-    /// In fault-capture mode keep-alive is off so the pod stays disconnected + advertising for the
-    /// wildcard scan to record a fault advert.
-    var appIsForeground: Bool { isAppForeground && !BluetoothManager.beaconCaptureEnabled }
+    var appIsForeground: Bool { isAppForeground }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
@@ -688,7 +663,7 @@ class BluetoothManager: NSObject {
     private func enterForeground() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         isAppForeground = true
-        if !BluetoothManager.beaconCaptureEnabled, let peripheral = keepAlivePeripheral, peripheral.state == .disconnected {
+        if let peripheral = keepAlivePeripheral, peripheral.state == .disconnected {
             log.default("[connectOnDemand] foreground — pre-connecting for keep-alive")
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] foreground — pre-connecting for keep-alive")
             beginCommandConnect(peripheral)
@@ -747,24 +722,16 @@ class BluetoothManager: NSObject {
             // allowDuplicates. Takes precedence over the monitor/beacon scans.
             services = BluetoothManager.alarmServiceUUIDs
             options = [:]
-        } else if BluetoothManager.beaconCaptureEnabled {
-            // §5: scan withServices:nil (wildcard) + allowDuplicates so we catch a beacon advertising
-            // a UUID we don't yet filter on. Foreground-only (the point of §5 is to find the filter UUID).
-            services = nil
-            options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         } else {
             // Monitor mode: filter on the pod's main service; allowDuplicates to see the advert cadence.
             services = [serviceUUID]
             options = BluetoothManager.advertisementMonitorEnabled ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
         }
-        log.default("Start scanning (filter=%{public}@, lowPowerMonitor=%{public}@, beaconCapture=%{public}@, allowDuplicates=%{public}@)",
+        log.default("Start scanning (filter=%{public}@, lowPowerMonitor=%{public}@, allowDuplicates=%{public}@)",
                     services == nil ? "nil (wildcard)" : services!.map { $0.uuidString }.joined(separator: ","),
                     String(describing: BluetoothManager.lowPowerMonitorEnabled),
-                    String(describing: BluetoothManager.beaconCaptureEnabled),
                     String(describing: options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil))
         manager.scanForPeripherals(withServices: services, options: options)
-        
-        CBConnectPeripheralOptionStartDelayKey
     }
 
     private func stopScanning() {
@@ -776,7 +743,7 @@ class BluetoothManager: NSObject {
     /// during the connect because an active allowDuplicates scan starves connection completion).
     /// Only when nothing is connected, so we never scan while a command is using the link.
     private func resumeScanIfNeeded() {
-        guard BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled || BluetoothManager.lowPowerMonitorEnabled else { return }
+        guard BluetoothManager.advertisementMonitorEnabled || BluetoothManager.lowPowerMonitorEnabled else { return }
         guard !alarmScanSuppressed else { return }   // an alert is active — stay quiet (re-wake quieting)
         guard manager?.state == .poweredOn, !manager.isScanning else { return }
         guard !devices.contains(where: { $0.manager.peripheral.state == .connected || $0.manager.peripheral.state == .connecting }) else { return }
@@ -972,10 +939,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
     private func surfacePodConditionAndQuiet(alertSet: AlertSet) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         connectionDelegate?.omnipodDidDetectAlert(slots: alertSet)
-        if !BluetoothManager.beaconCaptureEnabled {   // capture mode keeps the wildcard scan recording
-            alarmScanSuppressed = true
-            if manager.isScanning { manager.stopScan() }
-        }
+        alarmScanSuppressed = true
+        if manager.isScanning { manager.stopScan() }
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
@@ -986,23 +951,20 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // Full advertisement dump for pod-adjacent frames — the raw material for §5 (normal↔alarm
         // diff) and the "faults via advertisement" model. Captures every field, every time.
         let advSvcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
-        let isBeaconFrame = advSvcUUIDs.contains { $0.uuidString.uppercased().hasPrefix(BluetoothManager.beaconUUIDPrefix) }
         let isPodFrame = autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil
-        if (BluetoothManager.advertisementMonitorEnabled || BluetoothManager.beaconCaptureEnabled), isPodFrame || isBeaconFrame {
+        if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
             let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
             let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
             let svcData = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?
                 .map { "\($0.key.uuidString):\($0.value.hexadecimalString)" }.joined(separator: ",") ?? "-"
             let connectable = advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber
             let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "-"
-            // Tag beacon frames distinctly so the §5 diff is trivial to grep.
-            let tag = isBeaconFrame ? "[BEACON]" : "[ADV]"
             // Inter-frame delta = the advertising cadence (RE's DS-beacon-rate question).
             let now = Date()
             let dt = lastAdvSeen[peripheral.identifier.uuidString].map { String(format: "%.2f", now.timeIntervalSince($0)) } ?? "-"
             lastAdvSeen[peripheral.identifier.uuidString] = now
-            log.default("%{public}@ %{public}@ dt=%{public}@s rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
-                        tag, peripheral.identifier.uuidString, dt, RSSI, String(describing: peripheral.state.rawValue),
+            log.default("[ADV] %{public}@ dt=%{public}@s rssi=%{public}@ state=%{public}@ connectable=%{public}@ name=%{public}@ svcUUIDs=[%{public}@] mfg=%{public}@ svcData=%{public}@",
+                        peripheral.identifier.uuidString, dt, RSSI, String(describing: peripheral.state.rawValue),
                         String(describing: connectable), name.isEmpty ? "-" : name, svcUUIDs.isEmpty ? "-" : svcUUIDs, mfg, svcData)
             // Field advert logging (kept in production): record each DISTINCT pod advert to the device log
             // so real-world Issue Reports capture what the pod advertises — the raw material for decoding
@@ -1013,12 +975,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 let advKey = "\(svcUUIDs)|\(mfg)|conn=\(String(describing: connectable))"
                 if lastLoggedAdvKey[peripheral.identifier.uuidString] != advKey {
                     lastLoggedAdvKey[peripheral.identifier.uuidString] = advKey
-                    connectionDelegate?.omnipodLogDeviceEvent("\(tag) svcUUIDs=[\(svcUUIDs.isEmpty ? "-" : svcUUIDs)] mfg=\(mfg) connectable=\(String(describing: connectable)) svcData=\(svcData)")
+                    connectionDelegate?.omnipodLogDeviceEvent("[ADV] svcUUIDs=[\(svcUUIDs.isEmpty ? "-" : svcUUIDs)] mfg=\(mfg) connectable=\(String(describing: connectable)) svcData=\(svcData)")
                 }
             }
         } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-                  BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.beaconCaptureEnabled {
-            // Suppressed in beacon-capture (wildcard) mode — this fired for every nearby BLE device.
+                  BluetoothManager.advertisementMonitorEnabled {
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
 
@@ -1089,16 +1050,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         // Delayed-connect probe: report the delay, then disconnect after a brief hold so the loop
         // re-arms (didDisconnect issues the next probe). Skip the normal session proxy — timing only.
-        //  - delayedProbeInFlight: a connect WE issued as a probe.
-        //  - suppressCommands + active: test mode has no real command connects, so any connect
-        //    (incl. a restored one after relaunch) is a probe and must re-arm.
-        // In normal (command) mode we must NOT hijack a real command connect, so only genuine
-        // in-flight probes qualify.
         // A genuine heartbeat-probe wake: the StartDelay connect WE issued completed, and no command
         // is using the link. (A command connect sets commandConnectInFlight and clears delayedProbeInFlight,
         // so it never lands here — that was the old hijack that cancelled real commands after 2s.)
         let treatAsProbe = (delayedProbeInFlight && !commandConnectInFlight)
-                        || (delayedConnectProbeActive && BluetoothManager.suppressCommandsEnabled)
         if treatAsProbe {
             let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?(restored)"
             let pid = ProcessInfo.processInfo.processIdentifier

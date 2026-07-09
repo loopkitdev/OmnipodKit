@@ -696,15 +696,6 @@ class BlePodComms: PodComms {
 
     func bleRunSession(withName name: String, _ block: @escaping (_ result: SessionRunResult) -> Void) {
 
-        // Measurement mode: leave the pod fully idle-disconnected so the wildcard scan runs
-        // uninterrupted (no connect churn stopping it). Needed for a clean advert-cadence / CE1F923D
-        // capture. Field-test only — this stops ALL pod commands. Revert before merge.
-        if BluetoothManager.suppressCommandsEnabled {
-            log.default("[suppressCommands] skipping session '%{public}@' — pod left idle for measurement", name)
-            block(.failure(PodCommsError.podNotConnected))
-            return
-        }
-
         // In connect-on-demand mode the pod is normally disconnected, and self.manager (set only in
         // omnipodPeripheralDidConnect / on restore) is nil on a fresh launch — nothing has connected
         // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
