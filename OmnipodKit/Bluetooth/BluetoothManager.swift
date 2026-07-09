@@ -182,42 +182,35 @@ class BluetoothManager: NSObject {
     /// N distinct INITs with no matching DEINITs = leaked centrals (the suspected pairing-bug root).
     let instanceID = String(UUID().uuidString.prefix(8))
 
-    /// Field-test flag: keep scanning continuously (allowDuplicates) and log every pod advertisement,
-    /// to test the "stay scanning, connect on demand, faults signalled via advertisement" model.
+    /// Log each distinct pod advertisement ([ADV] → device log) so field Issue Reports capture what the
+    /// pod broadcasts — raw material for decoding more fault/alert states — and enable allowDuplicates on
+    /// the fallback monitor scan. Kept in production.
     static var advertisementMonitorEnabled: Bool {
         UserDefaults.standard.object(forKey: "OmnipodKit.advertisementMonitorEnabled") as? Bool ?? true
     }
 
-    /// Field-test flag: "normally disconnected" model. When on, the auto-reconnect machinery is
-    /// suppressed (the pod is NOT held connected); PeripheralManager connects on demand for each
-    /// session and disconnects when idle, and we scan (advertisementMonitor) while disconnected.
-    /// This changes how Loop stays in touch with the pump — every command pays a connect first.
+    /// The shipped "normally disconnected" model: the pod is NOT held connected; PeripheralManager
+    /// connects on demand for each session and disconnects when idle, and we alarm-scan while
+    /// disconnected. Every command pays a (fast fresh-discovery) connect first.
     static var connectOnDemandEnabled: Bool {
         UserDefaults.standard.object(forKey: "OmnipodKit.connectOnDemandEnabled") as? Bool ?? true
     }
 
-    /// Low-power fault-watch (option 3): scan filtered on the DASH ALARM service UUID(s) with
-    /// allowDuplicates OFF, so iOS only wakes us when the pod enters an alarm state (2nd service
-    /// UUID flips to an alarm value) — zero wakes during normal operation, and it survives into the
-    /// background via State Preservation/Restoration. Takes precedence over the monitor/beacon scans.
-    /// Trade-off: only catches the enumerated alarm UUIDs below (currently just the one confirmed
-    /// alert value); the clear transition isn't caught here (confirm on the next connect). See
-    /// DASH_BEACON_FINDINGS.md. Add more alarm UUID values as they're discovered.
-    /// Default ON for connect-on-demand mode: while idle, subscribe only for alarm adverts (`[C005]`),
-    /// so we get a background fault wake but don't wake on every normal advert. Connect-on-demand
-    /// (its own light helper scan) handles command connects.
+    /// Low-power fault-watch: the idle scan filters on the DASH FAULT service UUID(s) — `alarmServiceUUIDs`
+    /// = [C00A] — with allowDuplicates OFF, so iOS wakes us only when the pod's 2nd service UUID flips to
+    /// the fault value (C005→C00A). C00A isn't advertised in normal operation, so a fault is a fresh
+    /// discovery → a fast (<1 min) background wake that survives suspension via State Restoration; zero
+    /// wakes otherwise. Alerts (no service-UUID change) are NOT caught here — the heartbeat probe surfaces
+    /// those. Coexists with the StartDelay heartbeat probe. See DASH_BEACON_FINDINGS.md.
     static var lowPowerMonitorEnabled: Bool {
         UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
-    /// Field-test master switch for the IDLE scan (startScanning). ON = run the alarm-filtered
-    /// low-power scan while disconnected — the unsolicited fault listener: iOS wakes us only on an
-    /// alert advertisement (`C005`), so `detectPodAlertStatus` catches faults connectionlessly (zero
-    /// wakes in normal operation). OFF = no idle scan (pure scan-free connect measurement).
-    /// NOTE: command connects use fresh-discovery (a direct scanForPeripherals) either way; this only
-    /// governs the idle listener. NOTE: while a heartbeat StartDelay probe is active it stops this scan
-    /// to avoid starving the probe connect — so fault-listening + heartbeat don't yet fully coexist
-    /// (test the listener with a BLE CGM present, i.e. heartbeat off).
+    /// Master switch for the IDLE scan (startScanning). ON = run the C00A fault listener while
+    /// disconnected (connectionless fault detection). OFF = no idle scan. Command connects use
+    /// fresh-discovery either way; this only governs the idle listener. The idle scan COEXISTS with the
+    /// StartDelay heartbeat probe — both run while idle: the probe provides the periodic heartbeat/alert
+    /// wake, the scan provides fast fault wakes.
     static var scanningEnabled: Bool {
         UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? true
     }
