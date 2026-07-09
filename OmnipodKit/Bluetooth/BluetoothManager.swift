@@ -358,9 +358,7 @@ class BluetoothManager: NSObject {
         self.podType = podType
         super.init()
 
-        log.default("BluetoothManager #%{public}@ INIT (podType=%{public}@). Created from:\n%{public}@",
-                    instanceID, String(describing: podType),
-                    Thread.callStackSymbols.dropFirst().prefix(12).joined(separator: "\n"))
+        log.default("BluetoothManager #%{public}@ INIT (podType=%{public}@)", instanceID, String(describing: podType))
 
         managerQueue.sync {
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])

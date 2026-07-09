@@ -372,11 +372,12 @@ extension PeripheralManagerError {
 // and to capture the nonce-sequence behavior stage 2 needs.
 extension PeripheralManager {
 
-    /// FIELD TEST BUILD: defaults ON so the listener runs without UI to set the flag.
-    /// REVERT this commit before merge — stage 1 must ship OFF by default. The UserDefaults
-    /// key still overrides (set it to false to disable on-device).
+    /// Opt-in diagnostic (default OFF): a passive listener that logs pod-initiated (unsolicited) frames
+    /// pushed over an active connection. It does NOT route alerts or mutate session sequence state —
+    /// production fault detection is the connectionless C00A advertisement scan, not this. Ships off;
+    /// enable via the UserDefaults key for BLE protocol diagnostics.
     static var unsolicitedFaultListenerEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.unsolicitedFaultListenerEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.unsolicitedFaultListenerEnabled") as? Bool ?? false
     }
 
     /// Called from the cmd/data value-update macros (BLE callback thread) AFTER the raw
