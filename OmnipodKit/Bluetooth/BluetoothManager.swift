@@ -202,7 +202,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true   // ALERT-ADVERT CAPTURE: wildcard scan + device-log full adverts to diff configured vs firing UUIDs (revert after)
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
@@ -250,13 +250,13 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeEnabled") as? Bool ?? false
     }
 
-    /// Debug knob (default OFF): suppress the delayed-connect heartbeat probe so the idle alarm scan
-    /// runs with NO pending StartDelay connect. An experiment (2026-07-08) showed the probe is NOT
-    /// starving the scan — it's the reliable background WAKE: with it suppressed, a deep-idle alert
-    /// fired but was not detected until the app was reopened. So the alarm scan is best-effort and the
-    /// probe bounds detection latency. Left as a knob for future measurement; keep OFF in normal use.
+    /// Debug knob (default OFF = probe ON): suppress the delayed-connect heartbeat probe so the idle
+    /// alarm scan runs with NO pending StartDelay connect. Experiments (2026-07-08): the probe is the
+    /// heartbeat + the deep-idle surfacing path for ALERTS (which the scan can't wake on — no UUID
+    /// change). FAULTS wake the C00A-only scan directly (<1min, fresh discovery). Both run in production.
+    /// Left as a knob for future measurement; keep OFF in normal use.
     static var heartbeatProbeSuppressed: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? true   // C00A-ONLY TEST: probe OFF so the C00A fresh-discovery scan wake is the only wake — measures its true deep-idle fault latency
+        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? false
     }
 
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
@@ -274,12 +274,15 @@ class BluetoothManager: NSObject {
     ///   from a real [BEACON] capture before relying on these.
     /// - `C00A`: CONFIRMED fault 2nd-UUID (captured occlusion 0x14 — the pod's 2nd service UUID went
     ///   C001(normal)→C005(alert)→C00A(fault)). Include it so a fault wakes the low-power scan.
-    /// EXPERIMENT (revert after): C00A-ONLY fault scan. Dropping C005 means the pod does NOT match the
-    /// scan during normal operation (it advertises C005), so iOS isn't tracking it as "discovered". When
-    /// a fault flips the 2nd UUID to C00A, the pod becomes a genuinely NEW discovery — the event iOS
-    /// wakes a suspended app for — which should give a much faster deep-idle fault wake than the OR
-    /// filter (which kept the peripheral perpetually seen via C005 and coalesced the C00A re-discovery).
-    /// Gives up C005-based connectionless ALERT detection (already unusable in deep idle anyway).
+    /// C00A-ONLY fault scan (the adopted design; validated 2026-07-08). scanForPeripherals(withServices:)
+    /// is an OR filter, so including C005 kept the pod perpetually matched (a reminder is always
+    /// configured → C005 always advertised) → iOS treated it as already-discovered and COALESCED the
+    /// C005→C00A re-discovery (~7min deep-idle fault latency measured). Filtering on C00A ONLY means the
+    /// pod does not match during normal operation, so a fault's C005→C00A flip is a genuinely NEW
+    /// discovery — the event iOS wakes a suspended app for — giving <1min proactive deep-idle fault
+    /// detection (measured, probe off). We forgo C005-based connectionless ALERT detection, which never
+    /// worked in deep idle anyway (mfg-only change, no UUID change to wake on); alerts are surfaced by
+    /// the heartbeat probe (~5min) and the foreground keep-alive connection.
     static let alarmServiceUUIDs: [CBUUID] = [
         CBUUID(string: "C00A"),
     ]
