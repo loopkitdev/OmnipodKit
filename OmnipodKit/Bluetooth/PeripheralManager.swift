@@ -82,7 +82,7 @@ class PeripheralManager: NSObject {
 
     weak var delegate: PeripheralManagerDelegate?
 
-    /// PROTOTYPE: armed only once an encrypted session is fully established (set by
+    /// Armed only once an encrypted session is fully established (set by
     /// BlePodComms). The unsolicited-fault listener must NOT engage during connect/session
     /// negotiation — that traffic looks like pod-initiated transfers (multi-byte handshakes
     /// whose first byte is 0x00) and false-triggered a disconnect loop.
@@ -128,7 +128,7 @@ protocol PeripheralManagerDelegate: AnyObject {
     // Called from the PeripheralManager's queue
     func completeConfiguration(for manager: PeripheralManager) throws
 
-    /// PROTOTYPE (unsolicited-fault listener): a fully-assembled MessagePacket that
+    /// Unsolicited-fault listener (opt-in diagnostic): a fully-assembled MessagePacket that
     /// arrived UNSOLICITED — i.e. the pod initiated a transfer while we had no command
     /// in flight. The implementer (BlePodComms) holds the session keys and decrypts +
     /// logs it. Default is a no-op. Gated by `PeripheralManager.unsolicitedFaultListenerEnabled`.
@@ -363,7 +363,7 @@ extension PeripheralManager {
         log.default("[connectOnDemand] connecting on demand (state=%{public}d, timeout=%{public}ds)", peripheral.state.rawValue, Int(timeout))
         // Go fully dark for the connect: ANY concurrent scan (even non-allowDuplicates wildcard)
         // starves connection completion on iOS — connect-on-demand with a "helper" scan reliably
-        // TIMED OUT at 20s foreground, whereas the delayed-connect experiments (no scan) always
+        // TIMED OUT at 20s foreground, whereas a scan-free delayed connect always
         // completed. So stop scanning and let iOS complete the connect; the alarm scan resumes on
         // disconnect. (Latency without a scan is iOS's own reacquisition; measure it, optimize next.)
         let start = Date()

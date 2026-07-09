@@ -360,20 +360,19 @@ extension PeripheralManagerError {
     }
 }
 
-// MARK: - PROTOTYPE: unsolicited (pod-initiated) fault listener — Stage 1 (capture + decrypt-log)
+// MARK: - Unsolicited (pod-initiated) fault listener (opt-in diagnostic; default OFF)
 //
 // While CONNECTED, a pod can initiate a transfer (e.g. a fault/alert) without us having
-// sent a command. Today those notifications are only buffered and then flushed
-// (clearCommsQueues) before the next command, so we only learn of faults by polling
-// GetStatus. This stage detects a pod-initiated transfer while idle, drives the EXISTING
-// receive path to assemble the encrypted MessagePacket, and hands it to the delegate to
-// decrypt + log. It intentionally does NOT mutate session sequence state and does NOT
-// route alerts — its job is to confirm from field logs that pods push faults unsolicited
-// and to capture the nonce-sequence behavior stage 2 needs.
+// sent a command. Those notifications are normally buffered and then flushed
+// (clearCommsQueues) before the next command. This listener detects a pod-initiated transfer
+// while idle, drives the EXISTING receive path to assemble the encrypted MessagePacket, and
+// hands it to the delegate to decrypt + log (keeping the session nonce in sync). It does NOT
+// route alerts — production fault detection is the connectionless C00A advertisement scan.
+// This is a BLE-protocol diagnostic for characterizing unsolicited pod pushes from field logs.
 extension PeripheralManager {
 
-    /// Opt-in diagnostic (default OFF): a passive listener that logs pod-initiated (unsolicited) frames
-    /// pushed over an active connection. It does NOT route alerts or mutate session sequence state —
+    /// Opt-in diagnostic (default OFF): a listener that logs pod-initiated (unsolicited) frames pushed
+    /// over an active connection (keeping the session nonce in sync). It does NOT route alerts —
     /// production fault detection is the connectionless C00A advertisement scan, not this. Ships off;
     /// enable via the UserDefaults key for BLE protocol diagnostics.
     static var unsolicitedFaultListenerEnabled: Bool {

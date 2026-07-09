@@ -352,7 +352,7 @@ class BlePodComms: PodComms {
         // The podState's bleMessageTransportState will be updated when the above defer block is executed.
     }
 
-    // MARK: - PROTOTYPE: periodic-status registration (arms the pod to push)
+    // MARK: - Periodic-status registration (arms the pod to push)
 
     /// BEST-GUESS, UNCONFIRMED envelope. Registers a periodic status push so the pod ORIGINATES
     /// status-response frames on a schedule (caught by the unsolicited listener), with fault/alert
@@ -872,7 +872,7 @@ extension BlePodComms: PodCommsSessionDelegate {
     }
 }
 
-// MARK: - PROTOTYPE: unsolicited (pod-initiated) fault decrypt + logging — Stage 1
+// MARK: - Unsolicited (pod-initiated) fault decrypt + logging (opt-in diagnostic)
 extension BlePodComms {
     func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {
         podStateLock.lock()
@@ -891,7 +891,7 @@ extension BlePodComms {
 
         // A normal response decrypts at nonceSeq+1 (readAndAckResponse increments nonceSeq
         // before decrypt). An unsolicited message may land at a different offset; the offset
-        // that decrypts is the key datum stage 2 needs to advance live state correctly.
+        // that decrypts is the key datum needed to advance live state correctly.
         let base = mts.nonceSeq
         for delta in [1, 0, 2, 3, -1] {
             let seq = base + delta
@@ -911,9 +911,9 @@ extension BlePodComms {
                 } else {
                     log.default("[unsolicited] payload did not parse as a pod Message (may be an AID/text frame or partial)")
                 }
-                // STAGE 2a: commit the nonce advance so the NEXT command stays in sync — the pod
-                // advanced its nonce for this push. Data-driven: use the offset that decrypted
-                // (expected +1). Runs on the serial sessionQueue, so no command overlaps this.
+                // Commit the nonce advance so the NEXT command stays in sync — the pod advanced its
+                // nonce for this push. Data-driven: use the offset that decrypted (expected +1).
+                // Runs on the serial sessionQueue, so no command overlaps this.
                 podStateLock.lock()
                 if var committed = podState?.bleMessageTransportState {
                     let before = committed.nonceSeq
@@ -922,8 +922,8 @@ extension BlePodComms {
                     log.default("[unsolicited] committed nonceSeq %{public}d -> %{public}d (delta=%{public}d)", before, seq, delta)
                 }
                 podStateLock.unlock()
-                // STAGE 2b (TODO once decrypt is confirmed in the field): parse `decrypted` as a
-                // status/DetailedStatus response and route a fault via notifyPodFault.
+                // (Diagnostic only — production fault detection is the connectionless C00A advert scan,
+                // so we don't parse `decrypted` / route a fault here.)
                 return
             } catch {
                 log.debug("[unsolicited] decrypt miss at nonceSeq=%{public}d (delta=%{public}d): %{public}@", seq, delta, String(describing: error))

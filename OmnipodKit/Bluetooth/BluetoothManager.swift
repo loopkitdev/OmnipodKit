@@ -137,8 +137,8 @@ class BluetoothManager: NSObject {
     /// measurement the RE asked for — is there a usable periodic wake?).
     private var lastAdvSeen: [String: Date] = [:]
 
-    /// FAULT-CAPTURE: last full advert (svcUUIDs|mfg) device-logged per peripheral, so we record each
-    /// DISTINCT advert once (captures the fault transition without flooding the device log).
+    /// Last full advert (svcUUIDs|mfg) device-logged per peripheral, so we record each DISTINCT advert
+    /// once (captures the fault transition without flooding the device log).
     private var lastLoggedAdvKey: [String: String] = [:]
 
     /// Isolated to `managerQueue`
@@ -320,8 +320,8 @@ class BluetoothManager: NSObject {
         cm.connect(peripheral, options: nil)
     }
 
-    /// Issue a connect with CBConnectPeripheralOptionStartDelayKey and record the time, for the
-    /// timed-wake experiment. iOS holds the request for `delayedConnectProbeSeconds`, then connects.
+    /// Issue a connect with CBConnectPeripheralOptionStartDelayKey and record the time — the pump-provided
+    /// heartbeat wake. iOS holds the request for `delayedConnectProbeSeconds`, then connects.
     private func issueDelayedConnectProbe(_ peripheral: CBPeripheral) {
         // Never run the heartbeat probe during pairing — its connect/disconnect churn clobbers the
         // discovery scan (this blocked pairing a new pod after the old one was discarded).
@@ -709,8 +709,8 @@ class BluetoothManager: NSObject {
             return
         }
         if BluetoothManager.lowPowerMonitorEnabled {
-            // Option 3: wake only on an alarm-state advertisement. Filter on the alarm UUID(s), no
-            // allowDuplicates. Takes precedence over the monitor/beacon scans.
+            // Low-power fault-watch: wake only on a fault-state advertisement. Filter on the alarm
+            // UUID(s) (C00A), no allowDuplicates. Takes precedence over the monitor scan.
             services = BluetoothManager.alarmServiceUUIDs
             options = [:]
         } else {
@@ -872,10 +872,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
         return mfg.subdata(in: (mfg.count - 7)..<(mfg.count - 3))
     }
 
-    /// PROTOTYPE connectionless alert detection (§5 finding): read the pod's alert state straight from
-    /// its advertisement — no connection needed. Logs the status word and flags clear↔alert transitions.
-    /// TODO(stage 2): route a confirmed alert transition to the pump manager (raise/clear a pod alert)
-    /// once the per-alert bit mapping is confirmed across more alert types, to avoid false positives.
+    /// Connectionless fault/alert detection: read the pod's alarm state straight from its advertisement —
+    /// no connection needed. Decodes the status word (b2 = FaultEventCode, b3 = AlertSet bitmask) and, on
+    /// a fault/alert transition, surfaces it to the pump manager (which fetches status and raises the pod
+    /// alarm), then quiets the scan until it clears.
     private func detectPodAlertStatus(peripheral: CBPeripheral, advertisementData: [String: Any]) {
         guard let status = podStatusWord(from: advertisementData) else { return }
         let id = peripheral.identifier.uuidString
@@ -939,8 +939,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.debug("%{public}@: %{public}@, %{public}@", #function, peripheral, advertisementData)
 
-        // Full advertisement dump for pod-adjacent frames — the raw material for §5 (normal↔alarm
-        // diff) and the "faults via advertisement" model. Captures every field, every time.
+        // Full advertisement dump for pod-adjacent frames — field data on what the pod advertises, and
+        // the input to the connectionless fault-detection path. Captures every field.
         let advSvcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let isPodFrame = autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil
         if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
