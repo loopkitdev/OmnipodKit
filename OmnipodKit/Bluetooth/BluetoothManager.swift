@@ -202,7 +202,7 @@ class BluetoothManager: NSObject {
     /// normal↔triggered-alert diff pins the alarm-code offsets + the stable background-filter UUID.
     /// Heavy (wildcard foreground scan) — field-test only; revert before merge.
     static var beaconCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? false
+        UserDefaults.standard.object(forKey: "OmnipodKit.beaconCaptureEnabled") as? Bool ?? true   // FAULT-TYPE CAPTURE: wildcard scan + full-advert [ADV] logging to see the empty-reservoir fault's UUIDs/mfg (revert after)
     }
 
     /// Prefix of the DASH alarm/beacon 128-bit service UUID (per RE spec §3).
@@ -219,7 +219,7 @@ class BluetoothManager: NSObject {
     /// so we get a background fault wake but don't wake on every normal advert. Connect-on-demand
     /// (its own light helper scan) handles command connects.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? false   // FAULT-TYPE CAPTURE: off so beaconCapture wildcard scan runs — see the empty-reservoir fault's full advert UUIDs (revert after)
     }
 
     /// Field-test master switch for the IDLE scan (startScanning). ON = run the alarm-filtered
