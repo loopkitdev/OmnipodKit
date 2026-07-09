@@ -256,7 +256,7 @@ class BluetoothManager: NSObject {
     /// fired but was not detected until the app was reopened. So the alarm scan is best-effort and the
     /// probe bounds detection latency. Left as a knob for future measurement; keep OFF in normal use.
     static var heartbeatProbeSuppressed: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? false   // probe ON: production config (probe + alarm scan coexisting) — confirm the scan still wakes fast on a deep-idle fault
+        UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatProbeSuppressed") as? Bool ?? true   // C00A-ONLY TEST: probe OFF so the C00A fresh-discovery scan wake is the only wake — measures its true deep-idle fault latency
     }
 
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
@@ -274,11 +274,14 @@ class BluetoothManager: NSObject {
     ///   from a real [BEACON] capture before relying on these.
     /// - `C00A`: CONFIRMED fault 2nd-UUID (captured occlusion 0x14 — the pod's 2nd service UUID went
     ///   C001(normal)→C005(alert)→C00A(fault)). Include it so a fault wakes the low-power scan.
+    /// EXPERIMENT (revert after): C00A-ONLY fault scan. Dropping C005 means the pod does NOT match the
+    /// scan during normal operation (it advertises C005), so iOS isn't tracking it as "discovered". When
+    /// a fault flips the 2nd UUID to C00A, the pod becomes a genuinely NEW discovery — the event iOS
+    /// wakes a suspended app for — which should give a much faster deep-idle fault wake than the OR
+    /// filter (which kept the peripheral perpetually seen via C005 and coalesced the C00A re-discovery).
+    /// Gives up C005-based connectionless ALERT detection (already unusable in deep idle anyway).
     static let alarmServiceUUIDs: [CBUUID] = [
-        CBUUID(string: "C005"),
         CBUUID(string: "C00A"),
-        CBUUID(string: "CE1F923D-C539-48EA-7300-0A179F0CF102"),
-        CBUUID(string: "CE1F923D-C539-48EA-7300-0A179F0CF103"),
     ]
 
     /// Connect-request timestamps (by peripheral UUID) for measuring connect latency in didConnect.
