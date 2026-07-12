@@ -262,6 +262,11 @@ extension PeripheralManager {
     /// notifiable/indicatable one, logging each — so unsolicited pushes anywhere on the pod are captured in
     /// didUpdateValueFor. Best-effort; errors here must never break a real session.
     private func captureAllServicesAndCharacteristics(timeout: TimeInterval) throws {
+        // NEVER subscribe to the pod's own command/data/heartbeat characteristics here — the session
+        // flow (enableNotifications, during the O5 AID handshake) owns their notify timing, and enabling
+        // them early breaks O5's message sequencing. We only subscribe to UNEXPECTED notifiable chars.
+        let profileChars = Set([profile.commandCharacteristicUUID, profile.dataCharacteristicUUID,
+                                profile.heartbeatCharacteristicUUID].compactMap { $0 })
         try runCommand(timeout: timeout) {
             addCondition(.discoverServices)
             peripheral.discoverServices(nil)   // nil = all services
@@ -277,7 +282,7 @@ extension PeripheralManager {
                              p.contains(.read) ? "read" : nil, p.contains(.write) ? "write" : nil,
                              p.contains(.writeWithoutResponse) ? "writeNR" : nil].compactMap { $0 }.joined(separator: ",")
                 delegate?.peripheralManager(self, logCaptureEvent: "[capture] char service=\(service.uuid.uuidString) char=\(ch.uuid.uuidString) props=[\(flags)]")
-                if (p.contains(.notify) || p.contains(.indicate)), !ch.isNotifying {
+                if (p.contains(.notify) || p.contains(.indicate)), !ch.isNotifying, !profileChars.contains(ch.uuid) {
                     try? setNotifyValue(true, for: ch, timeout: timeout)
                 }
             }
