@@ -21,6 +21,7 @@ protocol DiagnosticCommands {
     func readTriggeredAlerts() async throws -> String
     func getDetailedStatus() async throws -> DetailedStatus
     func pumpManagerDetails() -> String
+    func triggerTestAlert() async throws
 }
 
 struct PodDiagnosticsView: View  {
@@ -43,6 +44,16 @@ struct PodDiagnosticsView: View  {
                 try await diagnosticCommands.playTestBeeps()
             })) {
                 FrameworkLocalText("Play Test Beeps", comment: "Text for play test beeps navigation link")
+                    .foregroundColor(Color.primary)
+            }
+            .disabled(!podOk)
+
+            // CAPTURE (revert before PR): fire a real non-fault alert ~60s out so we can capture the
+            // pod's alarm-state advertisement (DASH + O5) on command, non-destructively.
+            Button(action: {
+                Task { try? await diagnosticCommands.triggerTestAlert() }
+            }) {
+                Text("Trigger Test Alert (debug, fires in ~60s)")
                     .foregroundColor(Color.primary)
             }
             .disabled(!podOk)
