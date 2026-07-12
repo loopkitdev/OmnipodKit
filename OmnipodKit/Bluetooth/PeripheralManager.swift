@@ -574,9 +574,10 @@ extension PeripheralManager: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        if BluetoothManager.bleCaptureEnabled {
+        if BluetoothManager.bleCaptureEnabled || BluetoothManager.periodicStatusEnabled {
             // Full capture: log EVERY value update on EVERY subscribed characteristic (incl. ones outside
-            // the pod profile that we subscribed to below), so any unsolicited push lands in the log.
+            // the pod profile that we subscribed to below), so any unsolicited push — e.g. the pod's
+            // periodic-status CMD nudge — lands in the log.
             let hex = characteristic.value?.hexadecimalString ?? "-"
             delegate?.peripheralManager(self, logCaptureEvent: "[capture] notify char=\(characteristic.uuid.uuidString) len=\(characteristic.value?.count ?? 0) value=\(hex)")
         }

@@ -364,7 +364,7 @@ class BlePodComms: PodComms {
     /// seconds), response prefix `N0.0=`. If REJECTED, try: a different feature/attr split, binary
     /// vs ASCII seconds, or the standard `S0.0=` envelope.
     private func configurePeriodicStatus() {
-        guard PeripheralManager.unsolicitedFaultListenerEnabled else { return }
+        guard BluetoothManager.periodicStatusEnabled else { return }
         guard let manager = manager, podState != nil else { return }
         // Only on a healthy, fully-set-up pod. Never during pairing/activation, and never
         // on a faulted pod — otherwise this fires on every reconnect of a screaming pod and
@@ -378,7 +378,7 @@ class BlePodComms: PodComms {
             return
         }
 
-        let intervalSeconds = 10   // ~10s so the first push arrives quickly while testing (was 60)
+        let intervalSeconds = 30   // ~30s so pushes arrive quickly while testing (RE-confirmed cadences are 300s Auto / 60s fault)
 
         let transport = BlePodMessageTransport(manager: manager, myId: myId, podId: podId, state: podState!.bleMessageTransportState, signingKey: podState?.signingKey)
         transport.messageLogger = messageLogger

@@ -224,6 +224,14 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.bleCaptureEnabled") as? Bool ?? true
     }
 
+    /// PERIODIC-STATUS TEST (revert before PR): after session establishment, arm the pod's connected-state
+    /// periodic-status nudge (SN0.0=<seconds>) and STAY CONNECTED (force keep-alive on) so we can observe
+    /// the pod-initiated CMD indication push on a timer. Every value update is device-logged. Default ON
+    /// for this test build.
+    static var periodicStatusEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.periodicStatusEnabled") as? Bool ?? true
+    }
+
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
     /// an iOS reacquisition tail (~40s observed), so 300 → wake ~340s.
     static var delayedConnectProbeSeconds: Int {
@@ -272,7 +280,7 @@ class BluetoothManager: NSObject {
     /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
     private var isAppForeground = false
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
-    var appIsForeground: Bool { isAppForeground && !BluetoothManager.bleCaptureEnabled }
+    var appIsForeground: Bool { isAppForeground && (!BluetoothManager.bleCaptureEnabled || BluetoothManager.periodicStatusEnabled) }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
