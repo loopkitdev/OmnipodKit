@@ -874,6 +874,10 @@ extension BlePodComms: PodCommsSessionDelegate {
 
 // MARK: - Unsolicited (pod-initiated) fault decrypt + logging (opt-in diagnostic)
 extension BlePodComms {
+    func peripheralManager(_ manager: PeripheralManager, logCaptureEvent message: String) {
+        omnipodLogDeviceEvent(message)
+    }
+
     func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {
         podStateLock.lock()
         let mtsSnapshot = podState?.bleMessageTransportState

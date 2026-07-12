@@ -215,6 +215,15 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? true
     }
 
+    /// FULL BLE CAPTURE (revert before PR): high-fidelity RE capture — while idle, run a WILDCARD advert
+    /// scan (matches the pod in ANY state, incl. O5's CE1F923D UUID; does NOT assume DASH C00A) with
+    /// keep-alive OFF so the pod stays advertising; on connect, discover ALL services + characteristics,
+    /// subscribe to EVERY notifiable/indicatable one, and device-log every advert and every value update.
+    /// Default ON for the O5-investigation build.
+    static var bleCaptureEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.bleCaptureEnabled") as? Bool ?? true
+    }
+
     /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
     /// an iOS reacquisition tail (~40s observed), so 300 → wake ~340s.
     static var delayedConnectProbeSeconds: Int {
@@ -263,7 +272,7 @@ class BluetoothManager: NSObject {
     /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
     private var isAppForeground = false
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
-    var appIsForeground: Bool { isAppForeground }
+    var appIsForeground: Bool { isAppForeground && !BluetoothManager.bleCaptureEnabled }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
@@ -708,13 +717,19 @@ class BluetoothManager: NSObject {
             log.default("[connectOnDemand] scanning disabled — not starting a scan (scan-free connect mode)")
             return
         }
-        if BluetoothManager.lowPowerMonitorEnabled {
-            // Low-power fault-watch: wake only on a fault-state advertisement. Filter on the alarm
-            // UUID(s) (C00A), no allowDuplicates. Takes precedence over the monitor scan.
+        if BluetoothManager.bleCaptureEnabled {
+            // Full-capture: wildcard scan (matches the pod in any state, incl. O5's CE1F923D UUID —
+            // no DASH-C00A assumption) + allowDuplicates so we see the advert cadence and any state flip.
+            services = nil
+            options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        } else if BluetoothManager.lowPowerMonitorEnabled && podType.isDash {
+            // Low-power fault-watch (DASH only): wake on a fault-state advertisement — filter on the alarm
+            // UUID(s) (C00A), no allowDuplicates. C00A is DASH-specific, so never used for O5.
             services = BluetoothManager.alarmServiceUUIDs
             options = [:]
         } else {
-            // Monitor mode: filter on the pod's main service; allowDuplicates to see the advert cadence.
+            // Monitor mode: filter on the pod's main service (O5-aware via podScanServiceUUID);
+            // allowDuplicates to see the advert cadence.
             services = [serviceUUID]
             options = BluetoothManager.advertisementMonitorEnabled ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
         }
@@ -943,7 +958,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // the input to the connectionless fault-detection path. Captures every field.
         let advSvcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let isPodFrame = autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil
-        if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
+        if BluetoothManager.advertisementMonitorEnabled || BluetoothManager.bleCaptureEnabled, isPodFrame {
             let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
             let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
             let svcData = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?
@@ -970,11 +985,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 }
             }
         } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-                  BluetoothManager.advertisementMonitorEnabled {
+                  BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.bleCaptureEnabled {
+            // Suppressed during wildcard capture — this would fire for every nearby BLE device.
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
 
-        if isPodFrame {
+        // Connectionless alarm decode is DASH-specific (parses the DASH iBeacon status word). O5 encodes
+        // state differently (see the capture) — never run the DASH decode against an O5 advert.
+        if isPodFrame && podType.isDash {
             detectPodAlertStatus(peripheral: peripheral, advertisementData: advertisementData)
             // Fresh-discovery connect: we just heard the pod — stop scanning and connect NOW on this
             // fresh advertisement (fast) instead of waiting out iOS's cold reacquisition (~16s).
