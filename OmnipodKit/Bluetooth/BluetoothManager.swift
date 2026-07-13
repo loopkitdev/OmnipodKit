@@ -280,7 +280,7 @@ class BluetoothManager: NSObject {
     /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
     private var isAppForeground = false
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
-    var appIsForeground: Bool { isAppForeground && (!BluetoothManager.bleCaptureEnabled || BluetoothManager.periodicStatusEnabled) }
+    var appIsForeground: Bool { isAppForeground && !BluetoothManager.bleCaptureEnabled }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
