@@ -379,15 +379,6 @@ class BlePodComms: PodComms {
             omnipodLogDeviceEvent("[periodic] skip: pod is faulted")
             return
         }
-        // O5 arms periodic status via its AID (INS.) command envelope, NOT the DASH SN0.0= SLPE form.
-        // Sending the DASH command to an O5 pod is a wrong command it may reject (dropping the session),
-        // so skip it until the O5 AID envelope is wired through sendO5AidCommands. (DASH proceeds below.)
-        guard podType.isDash else {
-            log.default("[periodic] skip: O5 periodic-status needs the AID (INS.) envelope — not implemented")
-            omnipodLogDeviceEvent("[periodic] skip: O5 needs the AID (INS.) envelope; not sending DASH SN0.0= to an O5 pod")
-            return
-        }
-
         let intervalSeconds = 30   // ~30s so pushes arrive quickly while testing (RE-confirmed cadences are 300s Auto / 60s fault)
 
         let transport = BlePodMessageTransport(manager: manager, myId: myId, podId: podId, state: podState!.bleMessageTransportState, signingKey: podState?.signingKey)
@@ -397,25 +388,25 @@ class BlePodComms: PodComms {
             podState!.bleMessageTransportState = BleMessageTransportState(ck: transport.ck, noncePrefix: transport.noncePrefix, msgSeq: transport.msgSeq, nonceSeq: transport.nonceSeq, messageNumber: transport.messageNumber)
         }
 
-        // SN0.0= is a STANDARD S…= command (SLPE, 2-byte length-prefixed): the interval value is
-        // length-prefixed under "SN0.0=", the trailing get-key ",GN0.0" is empty. Registration is
-        // FIRE-AND-FORGET — the pod sends NO synchronous reply, so we do not read one (reading always
-        // timed out with emptyValue, a false negative). Success = the write is ACK'd; the real
-        // confirmation is the pod's first unsolicited PUSH ~intervalSeconds later, caught by the
-        // unsolicited listener.
-        let keys = ["SN0.0=", ",GN0.0"]
-        let payloads = [Data(String(intervalSeconds).utf8), Data()]
+        // Arm periodic Status via the AID Set command SN2.0=<seconds> (RE engineer, 2026-07-13):
+        //   S = AID Set, N2 = periodic namespace N + command token 2 (= Status), .0 = attribute 0,
+        //   =<seconds> = decimal-ASCII period. (Our earlier SN0.0= used the undefined command token 0.)
+        // SET-only, SLPE-wrapped, sent through the encrypted transport (Type-4 signed for O5).
+        // FIRE-AND-FORGET — the pod sends NO synchronous reply; success = the write is ACK'd, and the real
+        // confirmation is the pod's first unsolicited PUSH ~intervalSeconds later.
+        let keys = ["SN2.0="]
+        let payloads = [Data(String(intervalSeconds).utf8)]
         let wrapped = StringLengthPrefixEncoding.formatKeys(keys: keys, payloads: payloads)
         log.default("[periodic] pre-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d eapSeq=%{public}d bleId=%{public}@",
                     transport.nonceSeq, transport.msgSeq, transport.messageNumber, transport.eapSeq, podState?.bleIdentifier ?? "?")
         log.default("[periodic] register (fire-and-forget SLPE): keys=%{public}@ seconds=%{public}d wrappedHex=%{public}@ — success=write-ACK; watch [unsolicited] for a push in ~%{public}ds",
                     keys.joined(), intervalSeconds, wrapped.hexadecimalString, intervalSeconds)
-        omnipodLogDeviceEvent("[periodic] arming SN0.0=\(intervalSeconds) (podType=\(podType.isO5 ? "O5" : "DASH")) wrappedHex=\(wrapped.hexadecimalString)")
+        omnipodLogDeviceEvent("[periodic] arming SN2.0=\(intervalSeconds) (podType=\(podType.isO5 ? "O5" : "DASH")) wrappedHex=\(wrapped.hexadecimalString)")
         do {
             try transport.sendSlpeCommandFireAndForget(keys: keys, payloads: payloads)
-            log.default("[periodic] register write ACK'd — pod received SN0.0=%{public}d. Expecting an unsolicited push in ~%{public}ds (the push, not a reply, is the success signal).",
+            log.default("[periodic] register write ACK'd — pod received SN2.0=%{public}d. Expecting an unsolicited push in ~%{public}ds (the push, not a reply, is the success signal).",
                         intervalSeconds, intervalSeconds)
-            omnipodLogDeviceEvent("[periodic] arm write ACK'd (SN0.0=\(intervalSeconds)) — watch for a push in ~\(intervalSeconds)s")
+            omnipodLogDeviceEvent("[periodic] arm write ACK'd (SN2.0=\(intervalSeconds)) — watch for a push in ~\(intervalSeconds)s")
         } catch {
             log.error("[periodic] register send NOT ACK'd: %{public}@", String(describing: error))
             omnipodLogDeviceEvent("[periodic] arm write NOT ACK'd: \(String(describing: error))")
