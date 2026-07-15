@@ -315,18 +315,28 @@ public class OmniPumpManager: RileyLinkPumpManager {
     }
 
     public func setMustProvideBLEHeartbeat(_ mustProvideBLEHeartbeat: Bool) {
+        // Bridge the legacy boolean entry point through the richer request path (no reading-schedule
+        // detail — fall back to a default cadence in that case).
+        setBLEHeartbeatRequest(mustProvideBLEHeartbeat
+            ? PumpHeartbeatRequest(lastCGMReadingDate: nil, expectedCGMReadingInterval: .minutes(5))
+            : nil)
+    }
+
+    public func setBLEHeartbeatRequest(_ request: PumpHeartbeatRequest?) {
         // Log at the call site so we capture exactly what Loop requests and when — provideHeartbeat
         // isn't persisted, so reading it elsewhere can be stale relative to this call.
         let pid = ProcessInfo.processInfo.processIdentifier
-        logDeviceCommunication("[heartbeat] pid=\(pid) setMustProvideBLEHeartbeat(\(mustProvideBLEHeartbeat))", type: .connection)
+        let mustProvide = request != nil
+        let desc = request.map { "last=\($0.lastCGMReadingDate.map { String(describing: $0) } ?? "nil") interval=\(Int($0.expectedCGMReadingInterval))s" } ?? "nil"
+        logDeviceCommunication("[heartbeat] pid=\(pid) setBLEHeartbeatRequest(\(desc))", type: .connection)
         if self.state.podType.usesRileyLink {
-            rileyLinkDeviceProvider.timerTickEnabled = self.state.isPumpDataStale || mustProvideBLEHeartbeat
+            rileyLinkDeviceProvider.timerTickEnabled = self.state.isPumpDataStale || mustProvide
         } else {
-            provideHeartbeat = mustProvideBLEHeartbeat
-            // BLE pod: when the host needs us to provide the heartbeat (e.g. a CGM that can't), run
-            // the delayed-connect loop for periodic background wakes; otherwise stay disconnected +
-            // alarm-scan and connect on demand.
-            (podComms as? BlePodComms)?.setProvidesHeartbeat(mustProvideBLEHeartbeat)
+            provideHeartbeat = mustProvide
+            // BLE pod: when the host needs us to provide the heartbeat (e.g. a CGM that can't), run the
+            // delayed-connect loop for periodic background wakes, scheduled from the CGM reading time;
+            // otherwise stay disconnected + alarm-scan and connect on demand.
+            (podComms as? BlePodComms)?.setHeartbeatRequest(request)
         }
     }
 

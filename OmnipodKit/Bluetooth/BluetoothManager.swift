@@ -221,7 +221,7 @@ class BluetoothManager: NSObject {
     /// subscribe to EVERY notifiable/indicatable one, and device-log every advert and every value update.
     /// Default ON for the O5-investigation build.
     static var bleCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.bleCaptureEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.bleCaptureEnabled") as? Bool ?? false
     }
 
     /// PERIODIC-STATUS TEST (revert before PR): after session establishment, arm the pod's connected-state
@@ -229,13 +229,27 @@ class BluetoothManager: NSObject {
     /// the pod-initiated CMD indication push on a timer. Every value update is device-logged. Default ON
     /// for this test build.
     static var periodicStatusEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.periodicStatusEnabled") as? Bool ?? true
+        UserDefaults.standard.object(forKey: "OmnipodKit.periodicStatusEnabled") as? Bool ?? false
     }
 
-    /// Start delay (seconds) for the delayed-connect probe. Note the real wake lands at StartDelay +
-    /// an iOS reacquisition tail (~40s observed), so 300 → wake ~340s.
+    /// Fallback start delay (seconds) for the delayed-connect probe when Loop hasn't supplied a heartbeat
+    /// schedule (no `heartbeatTargetDate`). Normally the delay is computed from the CGM reading schedule —
+    /// see `issueDelayedConnectProbe`. Note the real wake lands at StartDelay + an iOS reacquisition tail
+    /// (~40s observed), so 300 → wake ~340s.
     static var delayedConnectProbeSeconds: Int {
         (UserDefaults.standard.object(forKey: "OmnipodKit.delayedConnectProbeSeconds") as? Int) ?? 300
+    }
+
+    /// Buffer (seconds) added after the next expected CGM reading when scheduling the heartbeat, so a
+    /// remote/network CGM value has time to be fetched and stored before the heartbeat drives a Loop cycle.
+    static var heartbeatBufferSeconds: TimeInterval {
+        (UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatBufferSeconds") as? Double) ?? 20
+    }
+
+    /// Floor (seconds) for the computed StartDelay, so a stale/overdue reading target can't produce a
+    /// near-zero delay that immediately reconnects. Overdue targets retry at this cadence.
+    static var heartbeatMinDelaySeconds: TimeInterval {
+        (UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatMinDelaySeconds") as? Double) ?? 60
     }
 
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
@@ -263,6 +277,14 @@ class BluetoothManager: NSObject {
     /// so didDiscover doesn't re-issue during the wait; the issue timestamp measures the true delay.
     private var delayedProbeInFlight = false
     private var delayedProbeIssuedAt: Date?
+    /// StartDelay (seconds) of the probe currently in flight, for latency logging in didConnect.
+    private var delayedProbeDelay: TimeInterval?
+
+    /// Target time for the next pump-provided heartbeat: the probe's StartDelay is computed so the wake
+    /// lands no earlier than this. Recomputed from Loop's `PumpHeartbeatRequest` each time it updates
+    /// (i.e. after each CGM reading), so the cadence tracks the actual reading schedule. nil = no schedule
+    /// supplied (fall back to `delayedConnectProbeSeconds`). managerQueue-isolated.
+    private var heartbeatTargetDate: Date?
 
     /// True while a real command's connect owns the link (connect-on-demand). The heartbeat probe and
     /// a command connect must never be outstanding together — a command preempts the probe and, while
@@ -295,33 +317,48 @@ class BluetoothManager: NSObject {
     private var heartbeatEnabled = false
 
     /// The delayed-connect (StartDelay) heartbeat probe runs exactly when Loop asks the pump to provide
-    /// the BLE heartbeat — i.e. `heartbeatEnabled`, set via PumpManager.setMustProvideBLEHeartbeat. No
+    /// the BLE heartbeat — i.e. `heartbeatEnabled`, set via PumpManager.setBLEHeartbeatRequest. No
     /// other gate: whenever the host needs a pump-provided heartbeat, the connect-delay probe is active.
     /// Isolated to managerQueue (all probe call sites run there).
     private var delayedConnectProbeActive: Bool {
         heartbeatEnabled
     }
 
-    /// Enable/disable the pump-provided heartbeat (delayed-connect loop). Driven by
-    /// PumpManager.setMustProvideBLEHeartbeat.
-    func setProvidesHeartbeat(_ enabled: Bool) {
+    /// Enable/disable and schedule the pump-provided heartbeat (delayed-connect loop). Driven by
+    /// PumpManager.setBLEHeartbeatRequest. `request == nil` disables it (fall back to connect-on-demand +
+    /// alarm scan). When non-nil, the next-heartbeat target is (lastCGMReading + expectedInterval + buffer);
+    /// this is refreshed on every call (e.g. after each CGM reading) so the cadence tracks the reading
+    /// schedule. Refreshing the target while a probe is already in flight does NOT churn it — the in-flight
+    /// probe completes and the next one picks up the new target.
+    func setHeartbeatRequest(_ request: PumpHeartbeatRequest?) {
         managerQueue.async {
-            guard self.heartbeatEnabled != enabled else { return }
+            let enabled = request != nil
+            if let request = request {
+                let base = request.lastCGMReadingDate ?? Date()
+                self.heartbeatTargetDate = base.addingTimeInterval(request.expectedCGMReadingInterval + BluetoothManager.heartbeatBufferSeconds)
+            } else {
+                self.heartbeatTargetDate = nil
+            }
+            let wasEnabled = self.heartbeatEnabled
             self.heartbeatEnabled = enabled
             let pid = ProcessInfo.processInfo.processIdentifier
-            self.log.default("[heartbeat] pid=%{public}d providesHeartbeat=%{public}@", pid, String(enabled))
-            self.connectionDelegate?.omnipodLogDeviceEvent("[heartbeat] pid=\(pid) providesHeartbeat=\(enabled)")
+            let targetDesc = self.heartbeatTargetDate.map { String(format: "%.0fs", $0.timeIntervalSinceNow) } ?? "-"
+            self.log.default("[heartbeat] pid=%{public}d providesHeartbeat=%{public}@ targetIn=%{public}@", pid, String(enabled), targetDesc)
+            self.connectionDelegate?.omnipodLogDeviceEvent("[heartbeat] pid=\(pid) providesHeartbeat=\(enabled) targetIn=\(targetDesc)")
             if enabled {
-                // Kick off the delayed-connect loop against the known autoconnect pod (nil if no active
-                // pod — don't probe a stale/discarded device).
+                // (Re)arm against the known autoconnect pod (nil if no active pod — don't probe a
+                // stale/discarded device). No-ops if a probe is already in flight.
                 if let peripheral = self.keepAlivePeripheral {
                     self.issueDelayedConnectProbe(peripheral)
                 }
-            } else {
-                // Stop the loop; fall back to connect-on-demand + alarm scan.
+            } else if wasEnabled {
+                // Stop the loop; fall back to connect-on-demand + alarm scan. Don't drop a live connection
+                // while foregrounded (keep-alive owns it then).
                 self.delayedProbeInFlight = false
-                for device in self.devices where device.manager.peripheral.state != .disconnected {
-                    self.manager.cancelPeripheralConnection(device.manager.peripheral)
+                if !self.isAppForeground {
+                    for device in self.devices where device.manager.peripheral.state != .disconnected {
+                        self.manager.cancelPeripheralConnection(device.manager.peripheral)
+                    }
                 }
                 self.resumeScanIfNeeded()
             }
@@ -345,17 +382,22 @@ class BluetoothManager: NSObject {
         guard !discoveryModeEnabled else { return }
         guard delayedConnectProbeActive, !delayedProbeInFlight, !commandConnectInFlight,
               peripheral.state == .disconnected else { return }
-        let delay = BluetoothManager.delayedConnectProbeSeconds
+        // Compute the StartDelay so the wake lands no earlier than the next-heartbeat target
+        // (lastCGMReading + expectedInterval + buffer). Floored so an overdue target can't collapse to a
+        // near-zero delay. Falls back to the fixed probe interval when Loop hasn't supplied a schedule.
+        let target = heartbeatTargetDate ?? Date().addingTimeInterval(TimeInterval(BluetoothManager.delayedConnectProbeSeconds))
+        let delay = max(BluetoothManager.heartbeatMinDelaySeconds, target.timeIntervalSinceNow)
         // Fault-listener coexistence: keep the alarm-filtered scan (C005, non-allowDuplicates — light)
-        // running alongside the StartDelay probe, so faults are still caught during the ~5-min heartbeat
+        // running alongside the StartDelay probe, so faults are still caught during the heartbeat
         // wait. Only a HEAVY allowDuplicates scan (monitor/beacon mode) starves the connect, so stop
         // just that. didConnect stops whatever scan remains for the duration of the connection.
         if manager.isScanning, !BluetoothManager.lowPowerMonitorEnabled { manager.stopScan() }
         delayedProbeInFlight = true
         delayedProbeIssuedAt = Date()
+        delayedProbeDelay = delay
         let pid = ProcessInfo.processInfo.processIdentifier
-        log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delay, peripheral.identifier.uuidString)
-        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delay)s")
+        log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}.0fs for %{public}@", pid, String(everForeground), delay, peripheral.identifier.uuidString)
+        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(String(format: "%.0f", delay))s")
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delay)])
     }
 
@@ -1073,12 +1115,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
         let treatAsProbe = (delayedProbeInFlight && !commandConnectInFlight)
         if treatAsProbe {
             let measured = delayedProbeIssuedAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "?(restored)"
+            let startDelayStr = delayedProbeDelay.map { String(format: "%.0f", $0) } ?? "?"
             let pid = ProcessInfo.processInfo.processIdentifier
-            log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ CONNECTED after %{public}@s (StartDelay=%{public}ds) %{public}@ — heartbeat wake",
-                        pid, String(everForeground), measured, BluetoothManager.delayedConnectProbeSeconds, peripheral.identifier.uuidString)
-            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) CONNECTED after \(measured)s (StartDelay=\(BluetoothManager.delayedConnectProbeSeconds)s) — heartbeat wake")
+            log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ CONNECTED after %{public}@s (StartDelay=%{public}@s) %{public}@ — heartbeat wake",
+                        pid, String(everForeground), measured, startDelayStr, peripheral.identifier.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) CONNECTED after \(measured)s (StartDelay=\(startDelayStr)s) — heartbeat wake")
             delayedProbeInFlight = false
             delayedProbeIssuedAt = nil
+            delayedProbeDelay = nil
             // Drop the wake connection and fire the heartbeat from didDisconnect (clean idle state), so
             // Loop's resulting status/dose commands run via connect-on-demand rather than fighting this
             // transient probe link.

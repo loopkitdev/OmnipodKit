@@ -751,10 +751,12 @@ extension PeripheralManager {
 
     /// Connect-on-demand: after a session goes idle, if no further session is queued, disconnect
     /// the pod so it's left "normally disconnected" (and advertising/observable) between commands.
-    /// A short delay batches command bursts (status → bolus → status) into one connection.
+    /// The delay batches a Loop cycle's command sequence (status read → dose decision → dose enact) into
+    /// one connection: Loop runs its algorithm between the status read and the dose command, so the window
+    /// must be long enough to span that gap and avoid a reconnect mid-cycle.
     private func scheduleIdleDisconnectIfNeeded() {
         guard BluetoothManager.connectOnDemandEnabled else { return }
-        let idleDelay: TimeInterval = 4
+        let idleDelay: TimeInterval = 15
         let idleAt = idleStart
         queue.asyncAfter(deadline: .now() + idleDelay) { [weak self] in
             guard let self = self, BluetoothManager.connectOnDemandEnabled else { return }
