@@ -252,6 +252,12 @@ class BluetoothManager: NSObject {
         (UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatMinDelaySeconds") as? Double) ?? 60
     }
 
+    /// Backoff (seconds) before re-arming the StartDelay probe after a connect FAILURE, so a
+    /// persistently-failing connect can't re-issue in a tight loop.
+    static var heartbeatFailureBackoffSeconds: TimeInterval {
+        (UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatFailureBackoffSeconds") as? Double) ?? 30
+    }
+
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
     /// - `C005`: CONFIRMED 16-bit alarm 2nd-UUID on this pod (expiration reminder). Extend as more
     ///   alert/alarm types are captured.
@@ -316,12 +322,14 @@ class BluetoothManager: NSObject {
     /// demand. managerQueue-isolated.
     private var heartbeatEnabled = false
 
-    /// The delayed-connect (StartDelay) heartbeat probe runs exactly when Loop asks the pump to provide
-    /// the BLE heartbeat — i.e. `heartbeatEnabled`, set via PumpManager.setBLEHeartbeatRequest. No
-    /// other gate: whenever the host needs a pump-provided heartbeat, the connect-delay probe is active.
-    /// Isolated to managerQueue (all probe call sites run there).
+    /// The delayed-connect (StartDelay) heartbeat probe runs when Loop asks the pump to provide the BLE
+    /// heartbeat (`heartbeatEnabled`, via PumpManager.setBLEHeartbeatRequest) AND the app is backgrounded.
+    /// CBConnectPeripheralOptionStartDelayKey is a background-only mechanism — iOS ignores the delay while
+    /// the app is foreground, so a foreground probe connects immediately, is treated as a wake, disconnects,
+    /// re-arms, and churns. While foreground the keep-alive connection already owns the link; heartbeat
+    /// wakes only matter for a suspended app. Isolated to managerQueue (all probe call sites run there).
     private var delayedConnectProbeActive: Bool {
-        heartbeatEnabled
+        heartbeatEnabled && !isAppForeground
     }
 
     /// Enable/disable and schedule the pump-provided heartbeat (delayed-connect loop). Driven by
@@ -384,9 +392,15 @@ class BluetoothManager: NSObject {
               peripheral.state == .disconnected else { return }
         // Compute the StartDelay so the wake lands no earlier than the next-heartbeat target
         // (lastCGMReading + expectedInterval + buffer). Floored so an overdue target can't collapse to a
-        // near-zero delay. Falls back to the fixed probe interval when Loop hasn't supplied a schedule.
+        // near-zero delay — an overdue target (missed/late reading) retries at the floor, which for a
+        // network CGM promptly catches a value that arrives a little late. Falls back to the fixed probe
+        // interval when Loop hasn't supplied a schedule.
         let target = heartbeatTargetDate ?? Date().addingTimeInterval(TimeInterval(BluetoothManager.delayedConnectProbeSeconds))
-        let delay = max(BluetoothManager.heartbeatMinDelaySeconds, target.timeIntervalSinceNow)
+        // CBConnectPeripheralOptionStartDelayKey requires an INTEGER number of seconds — a fractional
+        // NSNumber(double) is rejected with CBErrorDomain Code=1 "One or more parameters were invalid",
+        // which (combined with the failure re-arm) produced a tight connect/fail loop. Round to whole
+        // seconds, floored so an overdue target can't collapse to a near-zero delay.
+        let delaySeconds = max(Int(BluetoothManager.heartbeatMinDelaySeconds), Int(target.timeIntervalSinceNow.rounded()))
         // Fault-listener coexistence: keep the alarm-filtered scan (C005, non-allowDuplicates — light)
         // running alongside the StartDelay probe, so faults are still caught during the heartbeat
         // wait. Only a HEAVY allowDuplicates scan (monitor/beacon mode) starves the connect, so stop
@@ -394,11 +408,11 @@ class BluetoothManager: NSObject {
         if manager.isScanning, !BluetoothManager.lowPowerMonitorEnabled { manager.stopScan() }
         delayedProbeInFlight = true
         delayedProbeIssuedAt = Date()
-        delayedProbeDelay = delay
+        delayedProbeDelay = TimeInterval(delaySeconds)
         let pid = ProcessInfo.processInfo.processIdentifier
-        log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}.0fs for %{public}@", pid, String(everForeground), delay, peripheral.identifier.uuidString)
-        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(String(format: "%.0f", delay))s")
-        manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delay)])
+        log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delaySeconds, peripheral.identifier.uuidString)
+        connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delaySeconds)s")
+        manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delaySeconds)])
     }
 
     /// The keep-connected auto-reconnect. Suppressed in connect-on-demand mode, where the pod is
@@ -1207,7 +1221,17 @@ extension BluetoothManager: CBCentralManagerDelegate {
         delayedProbeInFlight = false
         resumeScanIfNeeded()   // keep the fault-listener alarm scan running while idle
         if delayedConnectProbeActive && !commandConnectInFlight && autoConnectIDs.contains(peripheral.identifier.uuidString) {
-            issueDelayedConnectProbe(peripheral)   // re-arm so a failed connect doesn't stall the loop
+            // Re-arm AFTER a backoff — a synchronously-failing connect (bad parameters, radio off, pod
+            // gone) must never re-issue at CPU speed. Re-fetch and re-check state after the delay.
+            let id = peripheral.identifier.uuidString
+            managerQueue.asyncAfter(deadline: .now() + BluetoothManager.heartbeatFailureBackoffSeconds) { [weak self] in
+                guard let self = self,
+                      self.delayedConnectProbeActive, !self.commandConnectInFlight, !self.delayedProbeInFlight,
+                      self.autoConnectIDs.contains(id),
+                      let p = self.devices.first(where: { $0.manager.peripheral.identifier.uuidString == id })?.manager.peripheral,
+                      p.state == .disconnected else { return }
+                self.issueDelayedConnectProbe(p)
+            }
         }
     }
 }
