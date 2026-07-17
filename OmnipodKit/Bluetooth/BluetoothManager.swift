@@ -215,22 +215,6 @@ class BluetoothManager: NSObject {
         UserDefaults.standard.object(forKey: "OmnipodKit.scanningEnabled") as? Bool ?? true
     }
 
-    /// FULL BLE CAPTURE (revert before PR): high-fidelity RE capture — while idle, run a WILDCARD advert
-    /// scan (matches the pod in ANY state, incl. O5's CE1F923D UUID; does NOT assume DASH C00A) with
-    /// keep-alive OFF so the pod stays advertising; on connect, discover ALL services + characteristics,
-    /// subscribe to EVERY notifiable/indicatable one, and device-log every advert and every value update.
-    /// Default ON for the O5-investigation build.
-    static var bleCaptureEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.bleCaptureEnabled") as? Bool ?? false
-    }
-
-    /// PERIODIC-STATUS TEST (revert before PR): after session establishment, arm the pod's connected-state
-    /// periodic-status nudge (SN0.0=<seconds>) and STAY CONNECTED (force keep-alive on) so we can observe
-    /// the pod-initiated CMD indication push on a timer. Every value update is device-logged. Default ON
-    /// for this test build.
-    static var periodicStatusEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.periodicStatusEnabled") as? Bool ?? false
-    }
 
     /// Fallback start delay (seconds) for the delayed-connect probe when Loop hasn't supplied a heartbeat
     /// schedule (no `heartbeatTargetDate`). Normally the delay is computed from the CGM reading schedule —
@@ -308,7 +292,7 @@ class BluetoothManager: NSObject {
     /// live and in-app commands are instant. On background we disconnect and resume the heartbeat probe.
     private var isAppForeground = false
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
-    var appIsForeground: Bool { isAppForeground && !BluetoothManager.bleCaptureEnabled }
+    var appIsForeground: Bool { isAppForeground }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
@@ -781,12 +765,7 @@ class BluetoothManager: NSObject {
             log.default("[connectOnDemand] scanning disabled — not starting a scan (scan-free connect mode)")
             return
         }
-        if BluetoothManager.bleCaptureEnabled {
-            // Full-capture: wildcard scan (matches the pod in any state, incl. O5's CE1F923D UUID —
-            // no DASH-C00A assumption) + allowDuplicates so we see the advert cadence and any state flip.
-            services = nil
-            options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
-        } else if BluetoothManager.lowPowerMonitorEnabled && podType.isDash {
+        if BluetoothManager.lowPowerMonitorEnabled && podType.isDash {
             // Low-power fault-watch (DASH only): wake on a fault-state advertisement — filter on the alarm
             // UUID(s) (C00A), no allowDuplicates. C00A is DASH-specific, so never used for O5.
             services = BluetoothManager.alarmServiceUUIDs
@@ -1022,7 +1001,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // the input to the connectionless fault-detection path. Captures every field.
         let advSvcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let isPodFrame = autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil
-        if BluetoothManager.advertisementMonitorEnabled || BluetoothManager.bleCaptureEnabled, isPodFrame {
+        if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
             let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
             let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
             let svcData = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?
@@ -1049,8 +1028,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 }
             }
         } else if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-                  BluetoothManager.advertisementMonitorEnabled, !BluetoothManager.bleCaptureEnabled {
-            // Suppressed during wildcard capture — this would fire for every nearby BLE device.
+                  BluetoothManager.advertisementMonitorEnabled {
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
 

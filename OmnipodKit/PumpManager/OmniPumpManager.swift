@@ -1844,38 +1844,6 @@ extension OmniPumpManager {
         }
     }
 
-    /// CAPTURE (revert before PR): schedule a real non-fault pod alert (expiration reminder) to fire
-    /// ~60s from now so we can capture the pod's alarm-state advertisement on command. Works for DASH
-    /// and O5 (configureAlerts is pod-type-agnostic via the session). Non-destructive — acknowledge the
-    /// alert away afterward.
-    func triggerTestAlert() async throws {
-        guard self.hasActivePod else {
-            throw OmniPumpManagerError.noPodPaired
-        }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            self.runSession(withName: "Trigger Test Alert") { (result) in
-                switch result {
-                case .success(let session):
-                    self.handleSilencePodEnd(session: session)
-                    let podTime = self.podTime
-                    let alertPodTime = podTime + TimeInterval(seconds: 60)  // fire ~60s from now (mirrors updateExpirationReminder math)
-                    let testAlert = PodAlert.expirationReminder(offset: podTime, absAlertTime: alertPodTime, silent: false)
-                    do {
-                        let beepBlock = self.beepMessageBlock(beepType: .beep)
-                        let _ = try session.configureAlerts([testAlert], beepBlock: beepBlock)
-                        self.log.default("[testAlert] scheduled expirationReminder to fire in ~60s (podTime=%{public}@, alertPodTime=%{public}@)", podTime.timeIntervalStr, alertPodTime.timeIntervalStr)
-                        self.logDeviceCommunication("[testAlert] scheduled expirationReminder to fire in ~60s (alertPodTime=\(alertPodTime.timeIntervalStr))", type: .connection)
-                        continuation.resume()
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-    }
-
     // Called on the main thread.
     // The UI is responsible for serializing calls to this method;
     // it does not handle concurrent calls.

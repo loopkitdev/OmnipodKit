@@ -133,14 +133,6 @@ protocol PeripheralManagerDelegate: AnyObject {
     /// in flight. The implementer (BlePodComms) holds the session keys and decrypts +
     /// logs it. Default is a no-op. Gated by `PeripheralManager.unsolicitedFaultListenerEnabled`.
     func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket)
-
-    /// Route a device-log line (Issue Report) — used by the full BLE capture to record discovered
-    /// characteristics and every value update. Default no-op.
-    func peripheralManager(_ manager: PeripheralManager, logCaptureEvent message: String)
-}
-
-extension PeripheralManagerDelegate {
-    func peripheralManager(_ manager: PeripheralManager, logCaptureEvent message: String) { }
 }
 
 extension PeripheralManagerDelegate {
@@ -250,41 +242,6 @@ extension PeripheralManager {
                 }
 
                 try setNotifyValue(true, for: characteristic, timeout: discoveryTimeout)
-            }
-        }
-
-        if BluetoothManager.bleCaptureEnabled {
-            try? captureAllServicesAndCharacteristics(timeout: discoveryTimeout)
-        }
-    }
-
-    /// FULL BLE CAPTURE (revert before PR): discover ALL services + characteristics and subscribe to every
-    /// notifiable/indicatable one, logging each — so unsolicited pushes anywhere on the pod are captured in
-    /// didUpdateValueFor. Best-effort; errors here must never break a real session.
-    private func captureAllServicesAndCharacteristics(timeout: TimeInterval) throws {
-        // NEVER subscribe to the pod's own command/data/heartbeat characteristics here — the session
-        // flow (enableNotifications, during the O5 AID handshake) owns their notify timing, and enabling
-        // them early breaks O5's message sequencing. We only subscribe to UNEXPECTED notifiable chars.
-        let profileChars = Set([profile.commandCharacteristicUUID, profile.dataCharacteristicUUID,
-                                profile.heartbeatCharacteristicUUID].compactMap { $0 })
-        try runCommand(timeout: timeout) {
-            addCondition(.discoverServices)
-            peripheral.discoverServices(nil)   // nil = all services
-        }
-        for service in peripheral.services ?? [] {
-            try runCommand(timeout: timeout) {
-                addCondition(.discoverCharacteristicsForService(serviceUUID: service.uuid))
-                peripheral.discoverCharacteristics(nil, for: service)   // nil = all characteristics
-            }
-            for ch in service.characteristics ?? [] {
-                let p = ch.properties
-                let flags = [p.contains(.notify) ? "notify" : nil, p.contains(.indicate) ? "indicate" : nil,
-                             p.contains(.read) ? "read" : nil, p.contains(.write) ? "write" : nil,
-                             p.contains(.writeWithoutResponse) ? "writeNR" : nil].compactMap { $0 }.joined(separator: ",")
-                delegate?.peripheralManager(self, logCaptureEvent: "[capture] char service=\(service.uuid.uuidString) char=\(ch.uuid.uuidString) props=[\(flags)]")
-                if (p.contains(.notify) || p.contains(.indicate)), !ch.isNotifying, !profileChars.contains(ch.uuid) {
-                    try? setNotifyValue(true, for: ch, timeout: timeout)
-                }
             }
         }
     }
@@ -574,13 +531,6 @@ extension PeripheralManager: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        if BluetoothManager.bleCaptureEnabled || BluetoothManager.periodicStatusEnabled {
-            // Full capture: log EVERY value update on EVERY subscribed characteristic (incl. ones outside
-            // the pod profile that we subscribed to below), so any unsolicited push — e.g. the pod's
-            // periodic-status CMD nudge — lands in the log.
-            let hex = characteristic.value?.hexadecimalString ?? "-"
-            delegate?.peripheralManager(self, logCaptureEvent: "[capture] notify char=\(characteristic.uuid.uuidString) len=\(characteristic.value?.count ?? 0) value=\(hex)")
-        }
         commandLock.lock()
 
         if let macro = configuration.valueUpdateMacros[characteristic.uuid] {

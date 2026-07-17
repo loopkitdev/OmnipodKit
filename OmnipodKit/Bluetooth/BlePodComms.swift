@@ -352,69 +352,6 @@ class BlePodComms: PodComms {
         // The podState's bleMessageTransportState will be updated when the above defer block is executed.
     }
 
-    // MARK: - Periodic-status registration (arms the pod to push)
-
-    /// BEST-GUESS, UNCONFIRMED envelope. Registers a periodic status push so the pod ORIGINATES
-    /// status-response frames on a schedule (caught by the unsolicited listener), with fault/alert
-    /// flags riding inside — "register once, don't poll". Called post-session-establishment while
-    /// holding podStateLock. Non-fatal: a rejection is logged so we can iterate the envelope.
-    ///
-    /// The exact wire form is unconfirmed. Current guesses (each a labeled knob to iterate from
-    /// field logs): command `SN0.0=<seconds>,GN0.0` (feature "N0", attr "0", ASCII decimal
-    /// seconds), response prefix `N0.0=`. If REJECTED, try: a different feature/attr split, binary
-    /// vs ASCII seconds, or the standard `S0.0=` envelope.
-    private func configurePeriodicStatus() {
-        guard BluetoothManager.periodicStatusEnabled else { return }
-        guard let manager = manager, podState != nil else { return }
-        // Only on a healthy, fully-set-up pod. Never during pairing/activation, and never
-        // on a faulted pod — otherwise this fires on every reconnect of a screaming pod and
-        // adds SN0.0= writes to a connect/disconnect loop.
-        guard podState?.isSetupComplete == true else {
-            log.default("[periodic] skip registration: pod setup not complete")
-            omnipodLogDeviceEvent("[periodic] skip: pod setup not complete")
-            return
-        }
-        guard podState?.fault == nil else {
-            log.default("[periodic] skip registration: pod is faulted")
-            omnipodLogDeviceEvent("[periodic] skip: pod is faulted")
-            return
-        }
-        let intervalSeconds = 30   // ~30s so pushes arrive quickly while testing (RE-confirmed cadences are 300s Auto / 60s fault)
-
-        let transport = BlePodMessageTransport(manager: manager, myId: myId, podId: podId, state: podState!.bleMessageTransportState, signingKey: podState?.signingKey)
-        transport.messageLogger = messageLogger
-        defer {
-            // Persist the sequence advance from the send so normal comms stay in sync.
-            podState!.bleMessageTransportState = BleMessageTransportState(ck: transport.ck, noncePrefix: transport.noncePrefix, msgSeq: transport.msgSeq, nonceSeq: transport.nonceSeq, messageNumber: transport.messageNumber)
-        }
-
-        // Arm periodic Status via the AID Set command SN2.0=<seconds> (RE engineer, 2026-07-13):
-        //   S = AID Set, N2 = periodic namespace N + command token 2 (= Status), .0 = attribute 0,
-        //   =<seconds> = decimal-ASCII period. (Our earlier SN0.0= used the undefined command token 0.)
-        // SET-only, SLPE-wrapped, sent through the encrypted transport (Type-4 signed for O5).
-        // FIRE-AND-FORGET — the pod sends NO synchronous reply; success = the write is ACK'd, and the real
-        // confirmation is the pod's first unsolicited PUSH ~intervalSeconds later.
-        let keys = ["SN2.0="]
-        let payloads = [Data(String(intervalSeconds).utf8)]
-        let wrapped = StringLengthPrefixEncoding.formatKeys(keys: keys, payloads: payloads)
-        log.default("[periodic] pre-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d eapSeq=%{public}d bleId=%{public}@",
-                    transport.nonceSeq, transport.msgSeq, transport.messageNumber, transport.eapSeq, podState?.bleIdentifier ?? "?")
-        log.default("[periodic] register (fire-and-forget SLPE): keys=%{public}@ seconds=%{public}d wrappedHex=%{public}@ — success=write-ACK; watch [unsolicited] for a push in ~%{public}ds",
-                    keys.joined(), intervalSeconds, wrapped.hexadecimalString, intervalSeconds)
-        omnipodLogDeviceEvent("[periodic] arming SN2.0=\(intervalSeconds) (podType=\(podType.isO5 ? "O5" : "DASH")) wrappedHex=\(wrapped.hexadecimalString)")
-        do {
-            try transport.sendSlpeCommandFireAndForget(keys: keys, payloads: payloads)
-            log.default("[periodic] register write ACK'd — pod received SN2.0=%{public}d. Expecting an unsolicited push in ~%{public}ds (the push, not a reply, is the success signal).",
-                        intervalSeconds, intervalSeconds)
-            omnipodLogDeviceEvent("[periodic] arm write ACK'd (SN2.0=\(intervalSeconds)) — watch for a push in ~\(intervalSeconds)s")
-        } catch {
-            log.error("[periodic] register send NOT ACK'd: %{public}@", String(describing: error))
-            omnipodLogDeviceEvent("[periodic] arm write NOT ACK'd: \(String(describing: error))")
-        }
-        log.default("[periodic] post-register transport state: nonceSeq=%{public}d msgSeq=%{public}d messageNumber=%{public}d",
-                    transport.nonceSeq, transport.msgSeq, transport.messageNumber)
-    }
-
     // MARK: - O5 Specific AID Setup commands
 
     /// Sends the O5-specific AID setup commands between GetStatus and SetupPod.
@@ -848,10 +785,6 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
-                // Re-enabled with the corrected SLPE encoding + a non-disconnecting read. The
-                // earlier plain-ASCII attempt sent an unparseable frame → pod silent → disconnect
-                // loop. If SLPE is still wrong the read no longer drops the pod (logs + continues).
-                configurePeriodicStatus()
                 manager.unsolicitedListenerArmed = true   // encrypted session ready; safe to observe pod-initiated transfers
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
@@ -878,10 +811,6 @@ extension BlePodComms: PodCommsSessionDelegate {
 
 // MARK: - Unsolicited (pod-initiated) fault decrypt + logging (opt-in diagnostic)
 extension BlePodComms {
-    func peripheralManager(_ manager: PeripheralManager, logCaptureEvent message: String) {
-        omnipodLogDeviceEvent(message)
-    }
-
     func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {
         podStateLock.lock()
         let mtsSnapshot = podState?.bleMessageTransportState
