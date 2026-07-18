@@ -1001,6 +1001,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // the input to the connectionless fault-detection path. Captures every field.
         let advSvcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let isPodFrame = autoConnectIDs.contains(peripheral.identifier.uuidString) || PodAdvertisement(advertisementData, podType: podType) != nil
+        // Only OUR paired pod (unique BLE identity) may drive fault detection / connect / probe. The
+        // C00A fault-scan filter is generic (any DASH pod's fault matches), so a nearby stranger's
+        // faulted pod can wake us — we must NOT act on it (no false alarm, and no foreign connect or
+        // scan-suppression). Advert LOGGING below stays on any pod-shaped frame (diagnostics + pairing).
+        let isOwnPod = autoConnectIDs.contains(peripheral.identifier.uuidString)
         if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
             let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
             let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
@@ -1033,8 +1038,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
 
         // Connectionless alarm decode is DASH-specific (parses the DASH iBeacon status word). O5 encodes
-        // state differently (see the capture) — never run the DASH decode against an O5 advert.
-        if isPodFrame && podType.isDash {
+        // state differently (see the capture) — never run the DASH decode against an O5 advert. Gated on
+        // isOwnPod so a foreign pod that matched the generic C00A filter can't drive detection/connect/probe.
+        if isOwnPod && podType.isDash {
             detectPodAlertStatus(peripheral: peripheral, advertisementData: advertisementData)
             // Fresh-discovery connect: we just heard the pod — stop scanning and connect NOW on this
             // fresh advertisement (fast) instead of waiting out iOS's cold reacquisition (~16s).
