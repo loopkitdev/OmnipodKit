@@ -710,11 +710,12 @@ extension PeripheralManager {
         let idleAt = idleStart
         queue.asyncAfter(deadline: .now() + idleDelay) { [weak self] in
             guard let self = self, BluetoothManager.connectOnDemandEnabled else { return }
-            // Foreground keep-alive: while the app is active, stay connected so connection-gated UI
-            // (test beeps, etc.) is live and in-app commands are instant. The background transition
-            // disconnects and resumes the heartbeat probe.
-            if self.bluetoothManager?.appIsForeground == true {
-                self.log.default("[connectOnDemand] app foreground — keeping pod connected (skip idle-disconnect)")
+            // Keep-alive: skip the idle-disconnect whenever we want the pod held connected — while the app
+            // is active (foreground keep-alive: connection-gated UI live, in-app commands instant), OR when
+            // a background Pod Keep Alive mode (silentTune/rileyLink) is selected for phone/pod combos where
+            // a disconnect→reconnect is unreliable. When Pod Keep Alive is disabled this is just foreground.
+            if self.bluetoothManager?.shouldHoldConnection == true {
+                self.log.default("[connectOnDemand] holding connection (keep-alive) — skip idle-disconnect")
                 return
             }
             // Only disconnect if we're still idle (no newer session) and nothing is queued/running.

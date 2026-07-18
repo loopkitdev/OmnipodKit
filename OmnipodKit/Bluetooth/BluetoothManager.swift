@@ -294,6 +294,19 @@ class BluetoothManager: NSObject {
     /// Cross-queue read for PeripheralManager's idle-disconnect (benign bool race, like everForeground).
     var appIsForeground: Bool { isAppForeground }
 
+    /// True when the pod should be HELD connected rather than idle/background-disconnected — the gate that
+    /// suppresses connect-on-demand's disconnects. True while the app is foregrounded (foreground
+    /// keep-alive), OR whenever a *background* Pod Keep Alive mode (silentTune / rileyLink — DASH only) is
+    /// selected. Those modes exist for iPhone 16/17e + InPlay (Atlas) DASH pods where a disconnect→reconnect
+    /// is unreliable, so the pod must stay connected and the keep-alive's periodic status refresh maintains
+    /// the link. When Pod Keep Alive is `.disabled` (the default) OR `.whenOpen`, this collapses to exactly
+    /// `isAppForeground` — i.e. no change from the validated connect-on-demand behavior. Read from
+    /// managerQueue and cross-queue by PeripheralManager (benign bool race, like appIsForeground).
+    var shouldHoldConnection: Bool {
+        if isAppForeground { return true }
+        return podType.isDash && Storage.shared.podKeepAlive.value.keepsPodConnectedInBackground
+    }
+
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
     /// iOS ran this process entirely in the background — proof of a background wake/relaunch the user
     /// did NOT initiate (a manual open would have foregrounded it). Set on the main queue via a
@@ -307,13 +320,14 @@ class BluetoothManager: NSObject {
     private var heartbeatEnabled = false
 
     /// The delayed-connect (StartDelay) heartbeat probe runs when Loop asks the pump to provide the BLE
-    /// heartbeat (`heartbeatEnabled`, via PumpManager.setBLEHeartbeatRequest) AND the app is backgrounded.
-    /// CBConnectPeripheralOptionStartDelayKey is a background-only mechanism — iOS ignores the delay while
-    /// the app is foreground, so a foreground probe connects immediately, is treated as a wake, disconnects,
-    /// re-arms, and churns. While foreground the keep-alive connection already owns the link; heartbeat
-    /// wakes only matter for a suspended app. Isolated to managerQueue (all probe call sites run there).
+    /// heartbeat (`heartbeatEnabled`, via PumpManager.setBLEHeartbeatRequest) AND we are NOT holding the pod
+    /// connected. CBConnectPeripheralOptionStartDelayKey is a background-only mechanism — iOS ignores the
+    /// delay while the app is foreground, so a foreground probe connects immediately, is treated as a wake,
+    /// disconnects, re-arms, and churns. When we're holding the connection (foreground, or a background Pod
+    /// Keep Alive mode) the pod is already connected and the heartbeat rides that link; the probe would
+    /// fight it. Isolated to managerQueue (all probe call sites run there).
     private var delayedConnectProbeActive: Bool {
-        heartbeatEnabled && !isAppForeground
+        heartbeatEnabled && !shouldHoldConnection
     }
 
     /// Enable/disable and schedule the pump-provided heartbeat (delayed-connect loop). Driven by
@@ -345,9 +359,9 @@ class BluetoothManager: NSObject {
                 }
             } else if wasEnabled {
                 // Stop the loop; fall back to connect-on-demand + alarm scan. Don't drop a live connection
-                // while foregrounded (keep-alive owns it then).
+                // while we're holding it (foreground keep-alive, or a background Pod Keep Alive mode).
                 self.delayedProbeInFlight = false
-                if !self.isAppForeground {
+                if !self.shouldHoldConnection {
                     for device in self.devices where device.manager.peripheral.state != .disconnected {
                         self.manager.cancelPeripheralConnection(device.manager.peripheral)
                     }
@@ -718,11 +732,23 @@ class BluetoothManager: NSObject {
         }
     }
 
-    /// App entered the background: drop the kept-alive connection and resume the ~5-min heartbeat probe.
+    /// App entered the background: normally drop the kept-alive connection and resume the heartbeat probe.
+    /// EXCEPTION — a background Pod Keep Alive mode (silentTune / rileyLink, DASH): keep the pod connected,
+    /// because those modes exist for phone/pod combos where a disconnect→reconnect is unreliable. The
+    /// keep-alive's periodic status refresh maintains the link; we just leave it connected and don't probe.
     private func enterBackground() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         isAppForeground = false
         guard let peripheral = keepAlivePeripheral else { return }
+        if shouldHoldConnection {   // background Pod Keep Alive mode — do NOT disconnect
+            log.default("[connectOnDemand] background — Pod Keep Alive holding connection (no disconnect)")
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] background — Pod Keep Alive holding connection")
+            if peripheral.state == .disconnected {
+                // We want it held connected but it's currently down — reconnect so keep-alive can refresh it.
+                beginCommandConnect(peripheral)
+            }
+            return
+        }
         commandConnectInFlight = false   // deliberate disconnect: let the probe re-arm
         if peripheral.state == .connected || peripheral.state == .connecting {
             log.default("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
@@ -1167,11 +1193,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
             autoReconnect(peripheral)
         }
         delayedProbeInFlight = false
-        if appIsForeground && commandConnectInFlight {
-            // Foreground keep-alive: an unintended drop while we want to stay connected (a deliberate
-            // background/idle disconnect clears commandConnectInFlight first, so it won't reconnect).
-            log.default("[connectOnDemand] foreground keep-alive — reconnecting after drop")
-            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] foreground keep-alive — reconnecting after drop")
+        if shouldHoldConnection && commandConnectInFlight {
+            // Keep-alive (foreground, or a background Pod Keep Alive mode): an unintended drop while we want
+            // to stay connected (a deliberate background/idle disconnect clears commandConnectInFlight first,
+            // so it won't reconnect).
+            log.default("[connectOnDemand] keep-alive — reconnecting after drop")
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] keep-alive — reconnecting after drop")
             connectViaFreshDiscovery(peripheral)
         } else {
             // Idle: run the fault-listener alarm scan, AND (if a heartbeat is needed) arm the StartDelay
