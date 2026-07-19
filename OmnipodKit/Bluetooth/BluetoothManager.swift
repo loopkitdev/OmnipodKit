@@ -319,6 +319,9 @@ class BluetoothManager: NSObject {
     /// demand. managerQueue-isolated.
     private var heartbeatEnabled = false
 
+    /// Generation token for the connected-state heartbeat timer. Bumped to invalidate a pending fire.
+    private var heartbeatTimerGeneration = 0
+
     /// The delayed-connect (StartDelay) heartbeat probe runs when Loop asks the pump to provide the BLE
     /// heartbeat (`heartbeatEnabled`, via PumpManager.setBLEHeartbeatRequest) AND we are NOT holding the pod
     /// connected. CBConnectPeripheralOptionStartDelayKey is a background-only mechanism — iOS ignores the
@@ -352,15 +355,18 @@ class BluetoothManager: NSObject {
             self.log.default("[heartbeat] pid=%{public}d providesHeartbeat=%{public}@ targetIn=%{public}@", pid, String(enabled), targetDesc)
             self.connectionDelegate?.omnipodLogDeviceEvent("[heartbeat] pid=\(pid) providesHeartbeat=\(enabled) targetIn=\(targetDesc)")
             if enabled {
-                // (Re)arm against the known autoconnect pod (nil if no active pod — don't probe a
-                // stale/discarded device). No-ops if a probe is already in flight.
+                // Deliver the heartbeat by whichever driver fits the current link state — these guard on
+                // opposite states, so only one acts: the StartDelay probe when DISCONNECTED, the timer when
+                // CONNECTED (held link). (Re)arm against the known autoconnect pod (nil if no active pod).
                 if let peripheral = self.keepAlivePeripheral {
-                    self.issueDelayedConnectProbe(peripheral)
+                    self.issueDelayedConnectProbe(peripheral)   // no-op unless disconnected + not held
                 }
+                self.startConnectedHeartbeatTimer()             // no-op unless connected
             } else if wasEnabled {
                 // Stop the loop; fall back to connect-on-demand + alarm scan. Don't drop a live connection
                 // while we're holding it (foreground keep-alive, or a background Pod Keep Alive mode).
                 self.delayedProbeInFlight = false
+                self.stopConnectedHeartbeatTimer()
                 if !self.shouldHoldConnection {
                     for device in self.devices where device.manager.peripheral.state != .disconnected {
                         self.manager.cancelPeripheralConnection(device.manager.peripheral)
@@ -411,6 +417,39 @@ class BluetoothManager: NSObject {
         log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delaySeconds, peripheral.identifier.uuidString)
         connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delaySeconds)s")
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delaySeconds)])
+    }
+
+    /// Connected-state heartbeat driver. The StartDelay probe only fires while the pod is DISCONNECTED
+    /// (it needs a disconnected peripheral, and iOS only honors StartDelay for a suspended app). When the
+    /// pod is instead held CONNECTED — foreground keep-alive, a Pod Keep Alive mode, or the O5 heartbeat
+    /// characteristic keeping the link alive — the probe can't run, and for a pump-provided heartbeat
+    /// (network CGM, the only loop driver) a held connection would otherwise STALL the loop (observed: a
+    /// ~12-min missed loop on O5). While connected, the app is kept alive by the BLE session, so we fire
+    /// the heartbeat from a timer instead. Aligned to `heartbeatTargetDate`; reschedules itself. Started on
+    /// didConnect, stopped on didDisconnect — so normal connect-on-demand cycles (connect → command →
+    /// idle-disconnect in ~15s) stop it long before it fires; it only ever drives when the link is held.
+    private func startConnectedHeartbeatTimer() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        heartbeatTimerGeneration += 1
+        guard heartbeatEnabled, keepAlivePeripheral?.state == .connected else { return }
+        let gen = heartbeatTimerGeneration
+        let target = heartbeatTargetDate ?? Date().addingTimeInterval(TimeInterval(BluetoothManager.delayedConnectProbeSeconds))
+        let delay = max(BluetoothManager.heartbeatMinDelaySeconds, target.timeIntervalSinceNow)
+        managerQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, gen == self.heartbeatTimerGeneration, self.heartbeatEnabled,
+                  self.keepAlivePeripheral?.state == .connected else { return }
+            let pid = ProcessInfo.processInfo.processIdentifier
+            self.log.default("[heartbeat] pid=%{public}d connected-state timer fired — driving heartbeat (held connection)", pid)
+            self.connectionDelegate?.omnipodLogDeviceEvent("[heartbeat] pid=\(pid) connected-state timer — driving heartbeat (held connection)")
+            self.connectionDelegate?.omnipodHeartbeatDidFire()
+            self.startConnectedHeartbeatTimer()   // reschedule for the next interval
+        }
+    }
+
+    /// Stop the connected-state heartbeat timer (invalidate any pending fire).
+    private func stopConnectedHeartbeatTimer() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        heartbeatTimerGeneration += 1
     }
 
     /// The keep-connected auto-reconnect. Suppressed in connect-on-demand mode, where the pod is
@@ -1173,6 +1212,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // Get an RSSI reading for logging
             peripheral.readRSSI()
         }
+
+        // While the link is held connected the StartDelay probe can't fire; drive the heartbeat from a
+        // timer instead so a network CGM keeps looping. No-op unless this is our pod + heartbeat is on.
+        if autoConnectIDs.contains(peripheral.identifier.uuidString) {
+            startConnectedHeartbeatTimer()
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -1180,6 +1225,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.default("[#%{public}@] DISCONNECTED: %{public}@ error=%{public}@ willReconnect=%{public}@", instanceID, peripheral,
                     String(describing: error), String(describing: autoConnectIDs.contains(peripheral.identifier.uuidString)))
+
+        // Link is down — the StartDelay probe (re-armed below) owns the heartbeat now; stop the timer.
+        stopConnectedHeartbeatTimer()
 
         // Proxy disconnection events to peripheral manager
         for device in devices where device.manager.peripheral.identifier == peripheral.identifier {
