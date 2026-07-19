@@ -242,6 +242,17 @@ class BluetoothManager: NSObject {
         (UserDefaults.standard.object(forKey: "OmnipodKit.heartbeatFailureBackoffSeconds") as? Double) ?? 30
     }
 
+    /// Idle-disconnect delay (seconds) after the last command's session. Kept SHORT so that in the
+    /// background a heartbeat-wake cycle disconnects promptly — before iOS suspends the app — which lets
+    /// the StartDelay probe re-arm (it needs a DISCONNECTED pod). A long delay let the app suspend with the
+    /// link still up and the timer frozen, so the probe never re-armed → a ~12-min missed loop (tester
+    /// report). Foreground / Pod Keep Alive hold the connection separately (`shouldHoldConnection`), so this
+    /// only takes effect while backgrounded. The status→dose burst still shares one connection: each session
+    /// resets `idleStart`, so the disconnect lands this many seconds after the LAST command.
+    static var idleDisconnectSeconds: TimeInterval {
+        (UserDefaults.standard.object(forKey: "OmnipodKit.idleDisconnectSeconds") as? Double) ?? 4
+    }
+
     /// Candidate DASH alarm-state service UUIDs to filter on in low-power mode.
     /// - `C005`: CONFIRMED 16-bit alarm 2nd-UUID on this pod (expiration reminder). Extend as more
     ///   alert/alarm types are captured.

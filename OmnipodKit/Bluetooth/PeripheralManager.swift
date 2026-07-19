@@ -701,12 +701,14 @@ extension PeripheralManager {
 
     /// Connect-on-demand: after a session goes idle, if no further session is queued, disconnect
     /// the pod so it's left "normally disconnected" (and advertising/observable) between commands.
-    /// The delay batches a Loop cycle's command sequence (status read → dose decision → dose enact) into
-    /// one connection: Loop runs its algorithm between the status read and the dose command, so the window
-    /// must be long enough to span that gap and avoid a reconnect mid-cycle.
+    /// The delay is kept SHORT (see `BluetoothManager.idleDisconnectSeconds`) so a background heartbeat-wake
+    /// cycle disconnects before iOS suspends the app — letting the StartDelay probe re-arm (it needs a
+    /// disconnected pod). The status→dose burst still shares one connection: each session resets `idleStart`,
+    /// so the disconnect only lands this many seconds after the LAST command. (Foreground / Pod Keep Alive
+    /// hold the connection separately via `shouldHoldConnection`, so this delay only bites while backgrounded.)
     private func scheduleIdleDisconnectIfNeeded() {
         guard BluetoothManager.connectOnDemandEnabled else { return }
-        let idleDelay: TimeInterval = 15
+        let idleDelay: TimeInterval = BluetoothManager.idleDisconnectSeconds
         let idleAt = idleStart
         queue.asyncAfter(deadline: .now() + idleDelay) { [weak self] in
             guard let self = self, BluetoothManager.connectOnDemandEnabled else { return }
