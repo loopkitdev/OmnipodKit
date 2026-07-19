@@ -54,14 +54,3 @@ enum o5OmnipodCharacteristicUUID: String, CBUUIDRawValue {
     case command = "1A7E2441-E3ED-4464-8B7E-751E03D0DC5F"       // Same as DASH
     case data =    "1A7E2443-E3ED-4464-8B7E-751E03D0DC5F"       // Similar to DASH, but with 2443 instead of 2442
 }
-
-// Omnipod 5 Heartbeat Service - used for O5 pod keep-alive
-enum o5Omnipod5HeartbeatServiceUUID: String, CBUUIDRawValue {
-    case advertisement = "ECF301E2-674B-4474-94D0-364F3AA653E6"
-    case service =       "7DED7A6C-CA72-46A7-A3A2-6061F6FDCAEB"
-}
-
-enum o5Omnipod5HeartbeatCharacteristicUUID: String, CBUUIDRawValue {
-    // The heartbeat characteristic UUID - to be confirmed via BLE service discovery
-    case heartbeat = "7DED7A6D-CA72-46A7-A3A2-6061F6FDCAEB"
-}
