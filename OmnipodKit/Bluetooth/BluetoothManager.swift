@@ -829,10 +829,15 @@ class BluetoothManager: NSObject {
             services = [serviceUUID]
             options = BluetoothManager.advertisementMonitorEnabled ? [CBCentralManagerScanOptionAllowDuplicatesKey: true] : [:]
         }
+        let filterDesc = services == nil ? "wildcard" : services!.map { $0.uuidString }.joined(separator: ",")
         log.default("Start scanning (filter=%{public}@, lowPowerMonitor=%{public}@, allowDuplicates=%{public}@)",
-                    services == nil ? "nil (wildcard)" : services!.map { $0.uuidString }.joined(separator: ","),
+                    filterDesc,
                     String(describing: BluetoothManager.lowPowerMonitorEnabled),
                     String(describing: options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil))
+        // Device-log the idle-scan arm so a fault-detection test can confirm which filter is actually live
+        // (e.g. the O5 …02 fault UUID built from our controllerId) even when the app is suspended and only
+        // the persistent device log survives.
+        connectionDelegate?.omnipodLogDeviceEvent("[scan] armed filter=[\(filterDesc)] lowPowerMonitor=\(BluetoothManager.lowPowerMonitorEnabled) allowDuplicates=\(options[CBCentralManagerScanOptionAllowDuplicatesKey] != nil)")
         manager.scanForPeripherals(withServices: services, options: options)
     }
 
