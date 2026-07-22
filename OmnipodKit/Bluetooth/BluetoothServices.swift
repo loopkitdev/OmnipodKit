@@ -45,6 +45,14 @@ func o5ServiceAdvertisementUUID(_ pdmId: UInt32) -> CBUUID {
     return CBUUID(string: uuidString)
 }
 
+// The faulted/attention O5 advertisement flips the trailing 1-byte status suffix from 00 (normal) to 02
+// — field-captured on an induced occlusion (see O5_ADVERTISING_FINDINGS.md). Like the healthy UUID it
+// embeds the pod's controllerId, so it is pod-specific: not a shared constant like DASH's C00A.
+func o5FaultAdvertisementUUID(_ pdmId: UInt32) -> CBUUID {
+    let uuidString = String(format: "CE1F923D-C539-48EA-7300-0A%08X02", pdmId)
+    return CBUUID(string: uuidString)
+}
+
 enum o5OmnipodServiceUUID: String, CBUUIDRawValue {
     case advertisement = "CE1F923D-C539-48EA-7300-0AFFFFFFFE00" // i.e., o5ServiceAdvertisementUUID(0xFFFFFFFE).uuidString
     case service =       "1A7E4024-E3ED-4464-8B7E-751E03D0DC5F" // Same as DASH

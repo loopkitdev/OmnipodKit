@@ -643,6 +643,15 @@ class BluetoothManager: NSObject {
         return podType.blePodProfile.advertisementServiceUUID
     }
 
+    /// O5 connectionless fault-watch filter: the pod-specific "attention" advertisement (status-suffix …02),
+    /// built from our paired controllerId. Nil on DASH or until we know the controllerId (post-pairing).
+    /// Analogous to the DASH `alarmServiceUUIDs` (C00A) but pod-specific — O5 embeds the controllerId in the
+    /// UUID rather than using a shared 16-bit fault UUID, so this can't be a static constant.
+    private var o5FaultScanServiceUUID: CBUUID? {
+        guard podType.isO5, let pdmId = uuidPdmId else { return nil }
+        return o5FaultAdvertisementUUID(pdmId)
+    }
+
     /// Peripheral awaiting a fresh-discovery connect: while set, the next matching didDiscover stops
     /// the scan and connects on that just-heard advertisement (fast) instead of a cold reacquisition.
     private var pendingFreshConnectID: String?
@@ -806,6 +815,13 @@ class BluetoothManager: NSObject {
             // Low-power fault-watch (DASH only): wake on a fault-state advertisement — filter on the alarm
             // UUID(s) (C00A), no allowDuplicates. C00A is DASH-specific, so never used for O5.
             services = BluetoothManager.alarmServiceUUIDs
+            options = [:]
+        } else if BluetoothManager.lowPowerMonitorEnabled, let o5Fault = o5FaultScanServiceUUID {
+            // Low-power fault-watch (O5): filter on the pod-specific "attention" advertisement (status-suffix
+            // …02), built from our controllerId. Not advertised in normal operation, so the …00→…02 flip is a
+            // fresh discovery that wakes a suspended app — the same mechanism as the DASH C00A scan. The wake
+            // is handled in didDiscover (own-pod-gated), which connects + reads the real status.
+            services = [o5Fault]
             options = [:]
         } else {
             // Monitor mode: filter on the pod's main service (O5-aware via podScanServiceUUID);
@@ -1098,6 +1114,21 @@ extension BluetoothManager: CBCentralManagerDelegate {
             }
             // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
             issueDelayedConnectProbe(peripheral)
+        }
+
+        // O5 connectionless fault-watch (SKETCH). Our O5 pod flips its single service-UUID status suffix from
+        // …00 (normal) to …02 (attention/fault) — field-captured on an induced occlusion (see
+        // O5_ADVERTISING_FINDINGS.md). Gated on isOwnPod: the controllerId embedded in the UUID can collide
+        // across app builds, so a stranger's faulted pod can match the …02 filter; only OUR pod (unique BLE
+        // identity) may drive detection. The suffix is a COARSE 4-state signal (00/01/02/03), NOT
+        // fault-specific — so we don't decode a fault type from it, we surface it to connect + read the real
+        // status (getPodStatus resolves the exact fault/alert), then quiet the scan while it persists.
+        // OPEN QUESTIONS before this ships: suffixes 01/03 are unknown, and whether any non-…00 suffix is
+        // *persistent* (the DASH-C005 coalescing trap that slows re-wakes) is unconfirmed.
+        if isOwnPod, podType.isO5, let o5Fault = o5FaultScanServiceUUID, advSvcUUIDs.contains(o5Fault) {
+            log.default("[POD-FAULT] %{public}@ → O5 attention advert (…02) (from advertisement, no connect)", peripheral.identifier.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[POD-FAULT] → O5 attention advert (…02) — connecting to read status")
+            surfacePodConditionAndQuiet(alertSet: AlertSet(rawValue: 0))
         }
 
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
