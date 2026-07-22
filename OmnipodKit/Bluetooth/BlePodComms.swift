@@ -726,7 +726,6 @@ extension BlePodComms: OmniConnectionDelegate {
         if let podState = podState, manager.peripheral.identifier.uuidString == podState.bleIdentifier {
             log.bleDebug("omnipodPeripheralDidConnect for %@", manager.peripheral.identifier.uuidString)
             needsSessionEstablishment = true
-            manager.unsolicitedListenerArmed = false   // re-negotiating; don't observe handshake traffic
             self.manager = manager
             delegate?.omnipodPeripheralDidConnect(manager: manager)
         }
@@ -735,7 +734,6 @@ extension BlePodComms: OmniConnectionDelegate {
     func omnipodPeripheralDidDisconnect(peripheral: CBPeripheral, error: Error?) {
         if let podState = podState, peripheral.identifier.uuidString == podState.bleIdentifier {
             log.bleDebug("omnipodPeripheralDidDisconnect for %@", peripheral.identifier.uuidString)
-            manager?.unsolicitedListenerArmed = false
             delegate?.omnipodPeripheralDidDisconnect(peripheral: peripheral, error: error)
         }
     }
@@ -785,7 +783,6 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
-                manager.unsolicitedListenerArmed = true   // encrypted session ready; safe to observe pod-initiated transfers
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
                 log.error("Pod session sync error: %{public}@", String(describing: error))
@@ -806,67 +803,5 @@ extension BlePodComms: PodCommsSessionDelegate {
 
         podCommsSession.assertOnSessionQueue()
         podState = state
-    }
-}
-
-// MARK: - Unsolicited (pod-initiated) fault decrypt + logging (opt-in diagnostic)
-extension BlePodComms {
-    func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {
-        podStateLock.lock()
-        let mtsSnapshot = podState?.bleMessageTransportState
-        podStateLock.unlock()
-
-        guard let mts = mtsSnapshot, let ck = mts.ck, let noncePrefix = mts.noncePrefix, noncePrefix.count == 8 else {
-            log.error("[unsolicited] cannot decrypt: no established session keys (havePodState=%{public}@)", String(describing: podState != nil))
-            return
-        }
-
-        let enDecrypt = EnDecrypt(nonce: Nonce(prefix: noncePrefix), ck: ck)
-
-        log.default("[unsolicited] decrypt attempt. live state: nonceSeq=%{public}d msgSeq=%{public}d eapSeq=%{public}d messageNumber=%{public}d. packet seq=%{public}d type=%{public}@ encPayloadLen=%{public}d",
-                    mts.nonceSeq, mts.msgSeq, mts.eapSeq, mts.messageNumber, packet.sequenceNumber, String(describing: packet.type), packet.payload.count)
-
-        // A normal response decrypts at nonceSeq+1 (readAndAckResponse increments nonceSeq
-        // before decrypt). An unsolicited message may land at a different offset; the offset
-        // that decrypts is the key datum needed to advance live state correctly.
-        let base = mts.nonceSeq
-        for delta in [1, 0, 2, 3, -1] {
-            let seq = base + delta
-            guard seq >= 0 else { continue }
-            do {
-                let decrypted = try enDecrypt.decrypt(packet, seq)
-                log.default("[unsolicited] DECRYPT OK at nonceSeq=%{public}d (delta=%{public}d). decryptedPayloadLen=%{public}d decryptedPayload=%{public}@ decryptedASCII=%{public}@",
-                            seq, delta, decrypted.payload.count, decrypted.payload.hexadecimalString, String(data: decrypted.payload, encoding: .utf8) ?? "<non-ascii>")
-                // Best-effort decode so a real fault push shows its structure (StatusResponse /
-                // DetailedStatus / PodInfoResponse), not just hex. Non-fatal; raw bytes logged above.
-                if let message = try? Message(encodedData: decrypted.payload, checkCRC: manager.podType.isO5) {
-                    log.default("[unsolicited] decoded blocks=[%{public}@]",
-                                message.messageBlocks.map { String(describing: $0.blockType) }.joined(separator: ", "))
-                    for block in message.messageBlocks {
-                        log.default("[unsolicited]   block: %{public}@", String(describing: block))
-                    }
-                } else {
-                    log.default("[unsolicited] payload did not parse as a pod Message (may be an AID/text frame or partial)")
-                }
-                // Commit the nonce advance so the NEXT command stays in sync — the pod advanced its
-                // nonce for this push. Data-driven: use the offset that decrypted (expected +1).
-                // Runs on the serial sessionQueue, so no command overlaps this.
-                podStateLock.lock()
-                if var committed = podState?.bleMessageTransportState {
-                    let before = committed.nonceSeq
-                    committed.nonceSeq = seq
-                    podState?.bleMessageTransportState = committed
-                    log.default("[unsolicited] committed nonceSeq %{public}d -> %{public}d (delta=%{public}d)", before, seq, delta)
-                }
-                podStateLock.unlock()
-                // (Diagnostic only — production fault detection is the connectionless C00A advert scan,
-                // so we don't parse `decrypted` / route a fault here.)
-                return
-            } catch {
-                log.debug("[unsolicited] decrypt miss at nonceSeq=%{public}d (delta=%{public}d): %{public}@", seq, delta, String(describing: error))
-            }
-        }
-        log.error("[unsolicited] DECRYPT FAILED at all tried offsets (base nonceSeq=%{public}d). encPayload=%{public}@",
-                  base, packet.payload.hexadecimalString)
     }
 }

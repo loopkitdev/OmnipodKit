@@ -64,7 +64,6 @@ struct BlePodProfile {
                 manager.cmdQueue.append(value)
                 manager.queueLock.signal()
                 manager.queueLock.unlock()
-                manager.noteInboundValueForUnsolicitedListener(characteristicUUID: characteristic.uuid, value: value)
             },
             dataCharacteristicUUID: { (manager: PeripheralManager) in
                 guard let characteristic = manager.peripheral.getDataCharacteristic(profile: manager.profile) else { return }
@@ -75,7 +74,6 @@ struct BlePodProfile {
                 manager.dataQueue.append(value)
                 manager.queueLock.signal()
                 manager.queueLock.unlock()
-                manager.noteInboundValueForUnsolicitedListener(characteristicUUID: characteristic.uuid, value: value)
             }
         ]
 

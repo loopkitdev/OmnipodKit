@@ -82,12 +82,6 @@ class PeripheralManager: NSObject {
 
     weak var delegate: PeripheralManagerDelegate?
 
-    /// Armed only once an encrypted session is fully established (set by
-    /// BlePodComms). The unsolicited-fault listener must NOT engage during connect/session
-    /// negotiation — that traffic looks like pod-initiated transfers (multi-byte handshakes
-    /// whose first byte is 0x00) and false-triggered a disconnect loop.
-    var unsolicitedListenerArmed = false
-
     init(peripheral: CBPeripheral, podType: PodType, centralManager: CBCentralManager) {
         self.peripheral = peripheral
         self.central = centralManager
@@ -127,25 +121,6 @@ extension PeripheralManager {
 protocol PeripheralManagerDelegate: AnyObject {
     // Called from the PeripheralManager's queue
     func completeConfiguration(for manager: PeripheralManager) throws
-
-    /// Unsolicited-fault listener (opt-in diagnostic): a fully-assembled MessagePacket that
-    /// arrived UNSOLICITED — i.e. the pod initiated a transfer while we had no command
-    /// in flight. The implementer (BlePodComms) holds the session keys and decrypts +
-    /// logs it. Default is a no-op. Gated by `PeripheralManager.unsolicitedFaultListenerEnabled`.
-    func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket)
-}
-
-extension PeripheralManagerDelegate {
-    func peripheralManager(_ manager: PeripheralManager, didReceiveUnsolicitedMessagePacket packet: MessagePacket) {}
-}
-
-extension PeripheralManager {
-    /// True when no command session is queued/running — used by the unsolicited-fault
-    /// listener to decide whether an inbound notification is pod-initiated (vs. a
-    /// response we're waiting for). `sessionQueue` is private to this file.
-    var isIdleForUnsolicitedListener: Bool {
-        return sessionQueue.operationCount == 0
-    }
 }
 
 
