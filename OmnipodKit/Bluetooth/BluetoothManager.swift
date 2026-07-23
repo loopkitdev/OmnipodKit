@@ -1121,15 +1121,16 @@ extension BluetoothManager: CBCentralManagerDelegate {
             issueDelayedConnectProbe(peripheral)
         }
 
-        // O5 connectionless fault-watch (SKETCH). Our O5 pod flips its single service-UUID status suffix from
-        // …00 (normal) to …02 (attention/fault) — field-captured on an induced occlusion (see
-        // O5_ADVERTISING_FINDINGS.md). Gated on isOwnPod: the controllerId embedded in the UUID can collide
-        // across app builds, so a stranger's faulted pod can match the …02 filter; only OUR pod (unique BLE
-        // identity) may drive detection. The suffix is a COARSE 4-state signal (00/01/02/03), NOT
-        // fault-specific — so we don't decode a fault type from it, we surface it to connect + read the real
-        // status (getPodStatus resolves the exact fault/alert), then quiet the scan while it persists.
-        // OPEN QUESTIONS before this ships: suffixes 01/03 are unknown, and whether any non-…00 suffix is
-        // *persistent* (the DASH-C005 coalescing trap that slows re-wakes) is unconfirmed.
+        // O5 connectionless fault-watch. Our O5 pod flips its single service-UUID status suffix from …00
+        // (normal) to …02 (attention/fault). Field-validated end-to-end: an induced occlusion flipped the
+        // advert to …02, this scan woke the backgrounded app, and the follow-on getPodStatus surfaced
+        // "Occluded" (0x14) to the pump manager (see O5_ADVERTISING_FINDINGS.md). Gated on isOwnPod: the
+        // controllerId embedded in the UUID can collide across app builds, so a stranger's faulted pod can
+        // match the …02 filter; only OUR pod (unique BLE identity) may drive detection. The suffix is a
+        // COARSE 4-state signal (00/01/02/03), NOT fault-specific — so we don't decode a fault type from it,
+        // we surface it to connect + read the real status (getPodStatus resolves the exact fault/alert), then
+        // quiet the scan while it persists. Suffixes 01/03 have not been observed and are intentionally not
+        // matched; any other attention state is simply caught on the next status read instead of the scan.
         if isOwnPod, podType.isO5, let o5Fault = o5FaultScanServiceUUID, advSvcUUIDs.contains(o5Fault) {
             log.default("[POD-FAULT] %{public}@ → O5 attention advert (…02) (from advertisement, no connect)", peripheral.identifier.uuidString)
             connectionDelegate?.omnipodLogDeviceEvent("[POD-FAULT] → O5 attention advert (…02) — connecting to read status")
